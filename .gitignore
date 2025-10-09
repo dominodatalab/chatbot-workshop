@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.DS_Store
+secrets.toml
+.ruff.toml
+.pre-commit-config.yaml
+
+# Ignore all dot-prefixed folders in the root (and their contents)
+# The "!" exception keeps this .gitignore file itself
+.*
+!/.gitignore
