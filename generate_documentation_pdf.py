@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import urljoin
+import markdown
+from weasyprint import HTML, CSS
 
 import requests
 
@@ -29,13 +31,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime, timedelta
 
-# Arize is optional; handle absence gracefully
-try:
-    from arize.exporter import ArizeExportClient
-    from arize.utils.types import Environments
-except Exception:
-    ArizeExportClient = None  # type: ignore
-    Environments = None       # type: ignore
+from arize.exporter import ArizeExportClient
+from arize.utils.types import Environments
 
 
 # =========================
@@ -65,10 +62,14 @@ def fetch_bundles(base_url, headers):
 def filter_bundles_by_project(data, project_id):
     if not data or 'data' not in data:
         return data
+
     filtered_bundles = [
         bundle for bundle in data['data']
         if bundle.get('projectId') == project_id and bundle.get('state') == 'Active'
     ]
+
+    filtered_bundles = [max(filtered_bundles, key=lambda b: datetime.fromisoformat(b["createdAt"].replace("Z", "+00:00")))]
+    
     filtered_data = data.copy()
     filtered_data['data'] = filtered_bundles
     if 'meta' in filtered_data and 'pagination' in filtered_data['meta']:
@@ -83,6 +84,9 @@ def fetch_bundle_drafts(base_url, headers, bundle_id):
         if response.status_code == 200:
             return response.json()
         else:
+            print(response)
+            print('drafts url', drafts_url)
+            print('headers', headers)
             print(f"Failed to get drafts data: {response.status_code}")
             return None
     except requests.exceptions.RequestException as e:
@@ -594,83 +598,35 @@ def generate_dashboard_png(output_dir: Path) -> Optional[Path]:
     df: Optional[pd.DataFrame] = None
     if api and space and model:
         df = pull_arize_data(api, space, model, days_back)
-    if df is None or df.empty:
-        # deterministic fallback
-        df = pd.DataFrame()
-
-    df = clean(df)
-    fig = build_dashboard(df)
-    out = output_dir / "ai_governance_dashboard_lite.png"
-    fig.savefig(out, dpi=300, bbox_inches="tight", facecolor="white", edgecolor="none", pad_inches=0.3)
-    plt.close(fig)
-    print(f"Saved dashboard: {out}")
-    return out
-
-
-# =========================
-# Orchestration
-# =========================
-
-def print_organized_evidence(evidence_groups):
-    print(f"\nORGANIZED EVIDENCE DATA FOR PDF GENERATION")
-    print(f"Found {len(evidence_groups)} evidence sections")
-    for i, (evidence_id, evidence) in enumerate(evidence_groups.items(), 1):
-        print(f"\n{'='*80}")
-        print(f"EVIDENCE SECTION {i}")
-        print(f"Evidence ID: {evidence_id}")
-        print(f"Last Updated: {evidence['updated_at']}")
-        print(f"Number of Artifacts: {len(evidence['artifacts'])}")
-        print(f"{'='*80}")
-        for j, artifact in enumerate(evidence['artifacts'], 1):
-            print(f"\n  Artifact {j}")
-            print(f"      Artifact ID: {artifact.get('artifact_id')}")
-            print(f"      Content Type: {artifact.get('content_type')}")
-            print(f"      Updated: {artifact.get('updated_at')}")
-            if artifact.get('content_type') == 'text':
-                content = artifact.get('text', '')
-                print(f"      Content: {content[:200]}..." if len(content) > 200 else f"      Content: {content}")
-            elif artifact.get('content_type') == 'multiple_choice':
-                print(f"      Selections: {artifact.get('selections')}")
-            elif artifact.get('content_type') == 'file_upload':
-                files = artifact.get('files', [])
-                print(f"      Files ({len(files)}):")
-                for f in files:
-                    print(f"        - {f.get('name')} ({f.get('sizeLabel')})")
-                    print(f"          Path: {f.get('path')}")
-            elif artifact.get('content_type') == 'structured_data':
-                print(f"      Structured Data: {artifact.get('content')}")
+        df = clean(df)
+        fig = build_dashboard(df)
+        out = output_dir / "ai_governance_dashboard_lite.png"
+        fig.savefig(out, dpi=300, bbox_inches="tight", facecolor="white", edgecolor="none", pad_inches=0.3)
+        plt.close(fig)
+        print(f"Saved dashboard: {out}")
+        return out
+        
+    print('did not save arize dashboard')
+    return None
 
 
-def print_bundle_summary(bundles):
+
+def save_bundle_summary(bundles, base_url):
     if not bundles:
         print("No active bundles found for this project.")
         return {}
 
-    base_url = 'https://se-demo.domino.tech/'
     headers = get_auth_headers()
 
     print(f"\n=== COMPREHENSIVE GOVERNANCE BUNDLE ANALYSIS ===")
     print(f"Total active bundles: {len(bundles)}")
 
     all_evidence_data = {}
-
+    
     for i, bundle in enumerate(bundles, 1):
         bundle_id = bundle.get('id')
         print(f"\n{'='*80}")
         print(f"COMPREHENSIVE BUNDLE REPORT: {bundle.get('name', 'Unnamed')}")
-        print(f"{'='*80}")
-
-        print(f"\nBASIC INFORMATION")
-        print(f"Bundle ID: {bundle_id}")
-        print(f"State: {bundle.get('state', 'Unknown')}")
-        print(f"Current Stage: {bundle.get('stage', 'Unknown')}")
-        print(f"Policy: {bundle.get('policyName', 'Unknown')}")
-        print(f"Classification: {bundle.get('classificationValue', 'None')}")
-        print(f"Project: {bundle.get('projectName', 'N/A')} (Owner: {bundle.get('projectOwner', 'N/A')})")
-
-        created_by = bundle.get('createdBy', {})
-        creator_name = f"{created_by.get('firstName', '')} {created_by.get('lastName', '')}".strip()
-        print(f"Created: {bundle.get('createdAt', 'Unknown')} by {creator_name}")
 
         print(f"\nFETCHING EVIDENCE DATA FROM DRAFTS")
         drafts_data = fetch_bundle_drafts(base_url, headers, bundle_id)
@@ -678,21 +634,9 @@ def print_bundle_summary(bundles):
         if drafts_data:
             print(f"Successfully retrieved {len(drafts_data)} evidence items")
             evidence_groups = parse_evidence_data(drafts_data)
-            print_organized_evidence(evidence_groups)
             all_evidence_data[bundle_id] = {'bundle': bundle, 'evidence': evidence_groups}
         else:
             print("No evidence data found")
-
-        stages = bundle.get('stages', [])
-        if stages:
-            print(f"\nGOVERNANCE STAGES ({len(stages)})")
-            for stage_num, stage in enumerate(stages, 1):
-                info = stage.get('stage', {})
-                name = info.get('name', 'Unknown')
-                print(f"  {stage_num}. {name}")
-                print(f"     Stage ID: {info.get('id', 'N/A')}")
-                if name == bundle.get('stage'):
-                    print(f"     CURRENT STAGE")
 
         if i < len(bundles):
             print(f"\n{'-'*80}\nNEXT BUNDLE\n{'-'*80}")
@@ -703,21 +647,19 @@ def print_bundle_summary(bundles):
         print(f"  - {data['bundle'].get('name', 'Unnamed')}: {len(data['evidence'])} evidence sections")
 
     print(f"\nGENERATING MARKDOWN DOCUMENTATION")
+    output_paths = []
     for bid, data in all_evidence_data.items():
         bundle_name = data['bundle'].get('name', 'Unnamed')
         safe_filename = "".join(c for c in bundle_name if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
-        output_path = f"{safe_filename}_documentation.md"
-        print(f"Creating documentation for: {bundle_name}")
+        output_path = f"/mnt/artifacts/{safe_filename}_documentation.md"
+        output_paths.append(output_path)
         generated_file = generate_markdown_documentation(data, data['evidence'], output_path)
-        print(f"Saved: {generated_file}")
 
-        # ---- NEW: append dashboard plots to each Markdown ----
         out_dir = Path(os.getenv("OUTPUT_DIR", "/mnt/artifacts"))
         png_path = generate_dashboard_png(out_dir)
-        if png_path:
-            append_dashboard_section(generated_file, png_path)
+        append_dashboard_section(generated_file, png_path)
 
-    return all_evidence_data
+    return all_evidence_data, output_paths[0]
 
 
 def append_dashboard_section(markdown_file: str, png_path: Path) -> None:
@@ -744,15 +686,12 @@ def append_dashboard_section(markdown_file: str, png_path: Path) -> None:
     print(f"Appended dashboard section to: {markdown_file}")
 
 
-def main():
-    base_url = 'https://se-demo.domino.tech/'
+def generate_markdown():
+    base_url = 'https://fitch.domino-eval.com/'
     project_id = os.getenv('DOMINO_PROJECT_ID')
-    if not project_id:
-        print("Error: DOMINO_PROJECT_ID environment variable not found.", file=sys.stderr)
-        print("Make sure you're running this script within a Domino project environment.", file=sys.stderr)
-        sys.exit(1)
 
     print(f"Filtering active bundles for project ID: {project_id}", file=sys.stderr)
+
     headers = get_auth_headers()
     data = fetch_bundles(base_url, headers)
     if data is None:
@@ -763,26 +702,16 @@ def main():
     active_bundles = len(filtered_data.get('data', []))
     print(f"Found {active_bundles} active bundles out of {total_bundles} total bundles for this project.", file=sys.stderr)
 
-    print_bundle_summary(filtered_data.get('data', []))
+    all_evidence_data, output_path = save_bundle_summary(filtered_data.get('data', []), base_url)
+    return output_path
 
 
-
-def main2():
-    import sys
-    from pathlib import Path
-
-    try:
-        import markdown
-        from weasyprint import HTML, CSS
-    except ImportError as e:
-        print("Missing packages. Install with:", file=sys.stderr)
-        print("  pip install markdown weasyprint", file=sys.stderr)
-        sys.exit(1)
-
+def convert_to_pdf(output_path):
+    print(output_path)
     # Hardcoded Domino paths
-    INPUT_MD  = Path("/mnt/code/HelpBot_v23_Internal_Policy_Update_documentation.md")
-    OUTPUT_PDF = Path("/mnt/artifacts/governance_report.pdf")
-    LETTERHEAD = Path("/mnt/code/images/letterhead.png")  # your Domino letterhead
+    INPUT_MD  = Path(output_path)
+    OUTPUT_PDF = Path("/mnt/artifacts/final_governance_report.pdf")
+    LETTERHEAD = Path("/mnt/code/images/letterhead.png")
 
     if not INPUT_MD.exists():
         print(f"ERROR: {INPUT_MD} not found.", file=sys.stderr)
@@ -906,5 +835,13 @@ def main2():
 
 
 if __name__ == "__main__":
-    main()
-    main2()
+    output_path = generate_markdown()
+    convert_to_pdf(output_path)
+
+    # for key, value in os.environ.items():
+    #     if 'domino' in key.lower():
+    #         print(f"{key}={value}")
+    # print('-'*80)
+    # for key, value in os.environ.items():
+    #     if 'rest' in key.lower():
+    #         print(f"{key}={value}")
