@@ -7,6 +7,14 @@ set -euo pipefail
 # Default to prod port 8888, but allow override via ENV or CLI arg
 PORT="${PORT:-${1:-8888}}"
 
+if command -v fuser &>/dev/null; then
+  echo "Killing any process on port $PORT…"
+  fuser -k "${PORT}/tcp" || true
+  sleep 1
+else
+  echo "fuser not found, skipping port kill."
+fi
+
 # Try to kill any existing Streamlit processes (ignore errors)
 if ! pkill -f streamlit 2>/dev/null; then
   echo "No existing Streamlit process found."
