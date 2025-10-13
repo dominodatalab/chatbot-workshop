@@ -4,6 +4,7 @@ import time
 from openai import OpenAI
 import streamlit as st
 import mlflow
+from mlflow.pyfunc import PythonModel
 from arize.otel import register
 from openinference.instrumentation.openai import OpenAIInstrumentor
 from opentelemetry import trace
@@ -39,6 +40,100 @@ AGENT_TOOLS = [
 ]
 
 
+class MultiAgentModel(PythonModel):
+    """MLflow-compatible wrapper for multi-agent orchestration"""
+    
+    def load_context(self, context):
+        """Initialize OpenAI client when model loads"""
+        api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY environment variable not set")
+        self.client = OpenAI(api_key=api_key)
+    
+    def _call_agent(self, agent_name: str, query: str) -> str:
+        """Execute single agent query"""
+        agent = next(a for a in AGENTS if a['name'] == agent_name)
+        
+        prompt = (
+            f"You are a {agent['role']}. "
+            f"Give a brief response (1-2 sentences).\n\n"
+            f"Query: {query}"
+        )
+        
+        response = self.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.8,
+            max_tokens=150
+        )
+        
+        return response.choices[0].message.content
+    
+    def predict(self, context, model_input):
+        """
+        Predict method for MLflow model.
+        Expects model_input as dict with 'query' and optional 'context' keys.
+        """
+        if isinstance(model_input, dict):
+            query = model_input.get('query', '')
+            conversation_context = model_input.get('context', [])
+        else:
+            query = model_input.iloc[0]['query']
+            conversation_context = model_input.iloc[0].get('context', [])
+        
+        messages = [
+            {
+                "role": "system", 
+                "content": (
+                    "You're an orchestrator. Use available agent tools to gather "
+                    "perspectives, then synthesize a final answer (2-3 sentences max). "
+                    "Be conversational and direct."
+                )
+            }
+        ]
+        if conversation_context:
+            messages.extend(conversation_context[-8:])
+        messages.append({"role": "user", "content": query})
+        
+        response = self.client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            tools=AGENT_TOOLS,
+            temperature=0.7
+        )
+        
+        agents_called = []
+        while response.choices[0].message.tool_calls:
+            messages.append(response.choices[0].message)
+            
+            for tool_call in response.choices[0].message.tool_calls:
+                func_name = tool_call.function.name
+                args = json.loads(tool_call.function.arguments)
+                agent_name = func_name.replace("call_", "")
+                
+                agent_response = self._call_agent(agent_name, args['query'])
+                agents_called.append(agent_name)
+                
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": agent_response
+                })
+            
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                tools=AGENT_TOOLS,
+                temperature=0.7
+            )
+        
+        return {
+            "answer": response.choices[0].message.content,
+            "agents_used": agents_called,
+            "num_agents": len(agents_called)
+        }
+
+
 @st.cache_resource
 def init_mlflow():
     """Initialize MLflow experiment"""
@@ -59,7 +154,6 @@ def init_tracing():
     
     OpenAIInstrumentor().instrument(tracer_provider=tracer_provider)
     
-    # Return tracer for manual workflow spans
     return trace.get_tracer(__name__)
 
 
@@ -111,7 +205,6 @@ def orchestrate_agents(client: OpenAI, query: str, context: list, tracer) -> tup
             start_time = time.time()
             mlflow.log_param("query", query[:100])
             
-            # Build conversation history
             messages = [
                 {
                     "role": "system", 
@@ -125,7 +218,6 @@ def orchestrate_agents(client: OpenAI, query: str, context: list, tracer) -> tup
             messages.extend(context[-8:])
             messages.append({"role": "user", "content": query})
             
-            # Initial orchestrator call
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
@@ -133,7 +225,6 @@ def orchestrate_agents(client: OpenAI, query: str, context: list, tracer) -> tup
                 temperature=0.7
             )
             
-            # Handle agent tool calls
             agents_called = []
             while response.choices[0].message.tool_calls:
                 messages.append(response.choices[0].message)
@@ -161,17 +252,51 @@ def orchestrate_agents(client: OpenAI, query: str, context: list, tracer) -> tup
             
             final_answer = response.choices[0].message.content
             
-            # Set workflow span attributes
             workflow_span.set_attribute(SpanAttributes.OUTPUT_VALUE, final_answer)
             workflow_span.set_attribute("agent.agents_used", ",".join(agents_called))
             workflow_span.set_attribute("agent.num_agents", len(agents_called))
             
-            # Log metrics
             mlflow.log_metric("duration_seconds", time.time() - start_time)
             mlflow.log_metric("num_agents_called", len(agents_called))
             mlflow.log_text(final_answer, "output.txt")
             if agents_called:
                 mlflow.log_param("agents_used", ",".join(agents_called))
+            
+            # Save agent configuration as JSON
+            agent_config = {
+                "agents": AGENTS,
+                "agent_tools": AGENT_TOOLS,
+                "orchestrator_prompt": (
+                    "You're an orchestrator. Use available agent tools to gather "
+                    "perspectives, then synthesize a final answer (2-3 sentences max). "
+                    "Be conversational and direct."
+                ),
+                "agent_prompt_template": (
+                    "You are a {role}. "
+                    "Give a brief response (1-2 sentences).\n\n"
+                    "Query: {query}"
+                ),
+                "model_params": {
+                    "orchestrator_model": "gpt-4o-mini",
+                    "orchestrator_temperature": 0.7,
+                    "agent_model": "gpt-4o-mini",
+                    "agent_temperature": 0.8,
+                    "agent_max_tokens": 150
+                }
+            }
+            mlflow.log_dict(agent_config, "agent_config.json")
+            
+            # Log model as generic Python model
+            mlflow.pyfunc.log_model(
+                artifact_path="model",
+                python_model=MultiAgentModel(),
+                pip_requirements=[
+                    "openai",
+                    "arize-otel",
+                    "openinference-instrumentation-openai",
+                    "opentelemetry-api"
+                ]
+            )
             
             return final_answer, run.info.run_id
 
@@ -179,7 +304,6 @@ def orchestrate_agents(client: OpenAI, query: str, context: list, tracer) -> tup
 def main():
     st.title("Multi-Agent Assistant")
     
-    # Sidebar configuration
     with st.sidebar:
         api_key = st.text_input("OpenAI API Key", type="password", key="openai_api_key")
         if api_key:
@@ -193,12 +317,10 @@ def main():
             "• Critic (evaluation)\n\n"
         )
     
-    # Early return if no API key
     if not api_key:
         st.info("👈 Enter your OpenAI API key in the sidebar to begin")
         return
     
-    # Initialize resources
     if "client" not in st.session_state or st.session_state.get("api_key") != api_key:
         st.session_state.client = OpenAI(api_key=api_key)
         st.session_state.api_key = api_key
@@ -208,12 +330,10 @@ def main():
     if "context" not in st.session_state:
         st.session_state.context = []
     
-    # Display conversation history
     for msg in st.session_state.context:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
     
-    # Handle user input
     if prompt := st.chat_input("Ask a question..."):
         st.chat_message("user").write(prompt)
         
@@ -229,7 +349,6 @@ def main():
                     st.write(answer)
                     st.caption(f"📊 MLflow run: `{run_id[:8]}...`")
                     
-                    # Update context (keep last 8 messages)
                     st.session_state.context.append({"role": "user", "content": prompt})
                     st.session_state.context.append({"role": "assistant", "content": answer})
                     st.session_state.context = st.session_state.context[-8:]
