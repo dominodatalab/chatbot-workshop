@@ -6,6 +6,7 @@ set -euo pipefail
 
 # Default to prod port 8888, but allow override via ENV or CLI arg
 PORT="${PORT:-${1:-8888}}"
+DOMINO_DOMAIN="${DOMINO_DOMAIN:-https://fitch.domino-eval.com}"
 
 if command -v fuser &>/dev/null; then
   echo "Killing any process on port $PORT…"
@@ -38,11 +39,10 @@ secondaryBackgroundColor = "#FAFAFA"
 textColor = "#2E2E38"
 EOF
 
-
 # Generate and display the Streamlit URL
 if [ -n "${DOMINO_RUN_HOST_PATH:-}" ]; then
     CLEAN_PATH=$(echo "$DOMINO_RUN_HOST_PATH" | sed 's|/r||g')
-    STREAMLIT_URL="https://fitch.domino-eval.com${CLEAN_PATH}proxy/${PORT}/"
+    STREAMLIT_URL="${DOMINO_DOMAIN}${CLEAN_PATH}proxy/${PORT}/"
     echo "========================================="
     echo "Streamlit URL: $STREAMLIT_URL"
     echo "========================================="
