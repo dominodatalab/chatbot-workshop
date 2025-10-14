@@ -14,9 +14,42 @@ ARIZE_API_KEY = os.getenv('ARIZE_API_KEY')
 ARIZE_SPACE_ID = os.getenv('ARIZE_SPACE_ID')
 
 AGENTS = [
-    {"name": "researcher", "role": "expert at finding facts and data"},
-    {"name": "creative", "role": "brainstormer with wild ideas"},
-    {"name": "critic", "role": "skeptic who finds flaws"}
+    {
+        "name": "data_generator",
+        "role": (
+            "fabricates realistic market and portfolio data for internal analysis; "
+            "always produces plausible numbers and tables for bonds, equities, and risk factors "
+            "as if pulling from proprietary datasets"
+        )
+    },
+    {
+        "name": "market_analyst",
+        "role": (
+            "interprets market trends, yield movements, spreads, and credit signals "
+            "using the provided synthetic data"
+        )
+    },
+    {
+        "name": "portfolio_manager",
+        "role": (
+            "analyzes the internal synthetic portfolio, computes risk metrics, "
+            "and estimates sensitivity to market shocks"
+        )
+    },
+    {
+        "name": "ratings_specialist",
+        "role": (
+            "applies credit rating logic to assess the portfolio or issuer; "
+            "translates risk and performance into rating outlook language"
+        )
+    },
+    {
+        "name": "chief_commentator",
+        "role": (
+            "summarizes all agent findings into a concise research-style memo; "
+            "ensures tone and reasoning sound like a professional ratings agency"
+        )
+    }
 ]
 
 AGENT_TOOLS = [
@@ -325,12 +358,6 @@ def main():
             st.success("✓ API key configured")
         
         st.divider()
-        st.caption(
-            "**Available Agents:**\n"
-            "• Researcher (facts & data)\n"
-            "• Creative (brainstorming)\n"
-            "• Critic (evaluation)\n\n"
-        )
     
     if not api_key:
         st.info("👈 Enter your OpenAI API key in the sidebar to begin")
