@@ -1,4 +1,4 @@
-import os, hashlib, base64, uuid, json, time
+import os, hashlib, base64, uuid, json, time, re
 from openai import OpenAI
 import streamlit as st
 import mlflow
@@ -36,6 +36,13 @@ AGENT_TOOLS = [
     }
     for agent in AGENTS
 ]
+
+def fix_latex(text: str) -> str:
+    """Convert parentheses-wrapped LaTeX to proper $ delimiters"""
+    text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text)
+    text = re.sub(r'\\\[(.*?)\\\]', r'$$\1$$', text)
+    return text
+
 
 def domino_short_id(length: int = 8) -> str:
     def short_fallback() -> str:
@@ -312,10 +319,6 @@ def orchestrate_agents(client: OpenAI, query: str, context: list, tracer) -> tup
 
 def main():
     st.title("HelpBot")
-    print('-'*80)
-    print('restarting main')
-    for key, value in sorted(os.environ.items()):
-        print(f"{key}={value}")
 
     with st.sidebar:
         api_key = st.text_input("OpenAI API Key", type="password", key="openai_api_key")
@@ -346,10 +349,11 @@ def main():
     
     for msg in st.session_state.context:
         with st.chat_message(msg["role"]):
-            st.write(msg["content"])
+            print('msg', msg)
+            st.markdown(fix_latex(msg["content"]))
     
     if prompt := st.chat_input("Ask a question..."):
-        st.chat_message("user").write(prompt)
+        st.chat_message("user").markdown(fix_latex(prompt))
         
         with st.chat_message("assistant"):
             with st.spinner("Consulting agents..."):
@@ -360,8 +364,8 @@ def main():
                         st.session_state.context,
                         st.session_state.tracer
                     )
-                    st.write(answer)
-                    st.caption(f"📊 MLflow run: `{run_id[:8]}...`")
+                    st.markdown(fix_latex(answer))
+                    st.caption(f"MLflow run: `{run_id[:8]}...`")
                     
                     st.session_state.context.append({"role": "user", "content": prompt})
                     st.session_state.context.append({"role": "assistant", "content": answer})
