@@ -257,7 +257,9 @@ def orchestrate_agents(client: OpenAI, query: str, context: list, tracer) -> tup
             workflow_span.set_attribute("agent.num_agents", len(agents_called))
             
             mlflow.log_metric("duration_seconds", time.time() - start_time)
-            mlflow.log_metric("num_agents_called", len(agents_called))
+            mlflow.log_metric("num_agents", len(agents_called))
+            mlflow.log_metric("ans_length", len(final_answer))
+            mlflow.log_metric("output", final_answer))
             mlflow.log_text(final_answer, "output.txt")
             if agents_called:
                 mlflow.log_param("agents_used", ",".join(agents_called))
