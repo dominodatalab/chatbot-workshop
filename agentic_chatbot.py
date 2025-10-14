@@ -268,17 +268,16 @@ def orchestrate_agents(client: OpenAI, query: str, context: list, tracer) -> tup
             final_answer = response.choices[0].message.content
             
             workflow_span.set_attribute(SpanAttributes.OUTPUT_VALUE, final_answer)
-            workflow_span.set_attribute("agent.agents_used", ",".join(agents_called))
+            workflow_span.set_attribute("agent.agents_used", ", ".join(agents_called) if agents_called else "none")
             workflow_span.set_attribute("agent.num_agents", len(agents_called))
-            
+
             mlflow.log_metric("duration_seconds", time.time() - start_time)
-            mlflow.log_metric("num_agents", len(agents_called))
-            mlflow.log_metric("ans_length", len(final_answer))
+            mlflow.log_metric("num_agents", int(len(agents_called)))
+            mlflow.log_metric("ans_length", int(len(final_answer)))
             mlflow.log_param("output", final_answer[:500])
             mlflow.log_text(final_answer, "output.txt")
-            if agents_called:
-                mlflow.log_param("agents_used", ",".join(agents_called))
-            
+            mlflow.log_param("agents_used", ", ".join(agents_called) if agents_called else "none")
+
             # Save agent configuration as JSON
             agent_config = {
                 "agents": AGENTS,
