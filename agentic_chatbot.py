@@ -307,12 +307,11 @@ def orchestrate_agents(client: OpenAI, query: str, context: list, tracer) -> tup
                     "opentelemetry-api"
                 ]
             )
-            
             return final_answer, run.info.run_id
 
 
 def main():
-    st.title("Multi-Agent Assistant")
+    st.title("HelpBot")
     print('-'*80)
     print('restarting main')
     for key, value in sorted(os.environ.items()):
