@@ -1,6 +1,4 @@
-import os
-import json
-import time
+import os, hashlib, base64, uuid, json, time
 from openai import OpenAI
 import streamlit as st
 import mlflow
@@ -38,6 +36,18 @@ AGENT_TOOLS = [
     }
     for agent in AGENTS
 ]
+
+def domino_short_id(length: int = 8) -> str:
+    def short_fallback() -> str:
+        return base64.urlsafe_b64encode(uuid.uuid4().bytes).decode("utf-8").rstrip("=")[:length]
+
+    user    = os.environ.get("DOMINO_USER_NAME") or short_fallback()
+    project = os.environ.get("DOMINO_PROJECT_ID")    or short_fallback()
+
+    combined = f"{user}/{project}"
+    digest   = hashlib.sha256(combined.encode()).digest()
+    encoded  = base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+    return f"{user}_{encoded[:length]}"
 
 
 class MultiAgentModel(PythonModel):
@@ -136,9 +146,7 @@ class MultiAgentModel(PythonModel):
 
 @st.cache_resource
 def init_mlflow():
-    """Initialize MLflow experiment"""
-    user = os.getenv("DOMINO_STARTING_USERNAME", "demo_user")
-    mlflow.set_experiment(f"Agent_POC_{user}")
+    mlflow.set_experiment(f"draft_experiment_{domino_short_id(4)}")
 
 
 @st.cache_resource
@@ -259,7 +267,7 @@ def orchestrate_agents(client: OpenAI, query: str, context: list, tracer) -> tup
             mlflow.log_metric("duration_seconds", time.time() - start_time)
             mlflow.log_metric("num_agents", len(agents_called))
             mlflow.log_metric("ans_length", len(final_answer))
-            mlflow.log_metric("output", final_answer))
+            mlflow.log_param("output", final_answer[:500])
             mlflow.log_text(final_answer, "output.txt")
             if agents_called:
                 mlflow.log_param("agents_used", ",".join(agents_called))
@@ -305,7 +313,11 @@ def orchestrate_agents(client: OpenAI, query: str, context: list, tracer) -> tup
 
 def main():
     st.title("Multi-Agent Assistant")
-    
+    print('-'*80)
+    print('restarting main')
+    for key, value in sorted(os.environ.items()):
+        print(f"{key}={value}")
+
     with st.sidebar:
         api_key = st.text_input("OpenAI API Key", type="password", key="openai_api_key")
         if api_key:
@@ -324,6 +336,7 @@ def main():
         return
     
     if "client" not in st.session_state or st.session_state.get("api_key") != api_key:
+        
         st.session_state.client = OpenAI(api_key=api_key)
         st.session_state.api_key = api_key
         init_mlflow()
