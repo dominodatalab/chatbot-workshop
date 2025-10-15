@@ -70,6 +70,37 @@ AGENT_TOOLS = [
     for agent in AGENTS
 ]
 
+def detect_hallucination(client: OpenAI, query: str, answer: str, tracer) -> dict:
+    """Check answer consistency/groundedness"""
+    with tracer.start_as_current_span("hallucination_check") as span:
+        prompt = f"""Given this query and answer, rate the response on:
+                1. Internal consistency (0-1): Does it contradict itself?
+                2. Specificity (0-1): Are claims specific vs vague?
+                3. Confidence (0-1): Does it acknowledge uncertainty appropriately?
+                
+                Query: {query}
+                Answer: {answer}
+                
+                Respond ONLY with JSON: {{"consistency": 0.0-1.0, "specificity": 0.0-1.0, "confidence": 0.0-1.0, "reasoning": "brief explanation"}}"""
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            response_format={"type": "json_object"}
+        )
+        
+        result = json.loads(response.choices[0].message.content)
+        print('halluci', result)
+        result['hallucination_score'] = 1.0 - (
+            result['consistency'] * 0.5 + 
+            result['specificity'] * 0.3 + 
+            result['confidence'] * 0.2
+        )
+        
+        span.set_attribute("hallucination.score", result['hallucination_score'])
+        return result
+
 def fix_latex(text: str) -> str:
     """Convert parentheses-wrapped LaTeX to proper $ delimiters"""
     text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text)
@@ -249,7 +280,7 @@ def orchestrate_agents(client: OpenAI, query: str, context: list, tracer) -> tup
             SpanAttributes.INPUT_VALUE: query,
         }
     ) as workflow_span:
-        with mlflow.start_run(run_name=f"agents_{int(time.time())}") as run:
+        with mlflow.start_run(run_name=f"helpbot_{int(time.time())}") as run:
             start_time = time.time()
             mlflow.log_param("query", query[:100])
             
@@ -299,6 +330,13 @@ def orchestrate_agents(client: OpenAI, query: str, context: list, tracer) -> tup
                 )
             
             final_answer = response.choices[0].message.content
+
+            hallucination_check = detect_hallucination(client, query, final_answer, tracer)
+            
+            mlflow.log_metric("hallucination_score", hallucination_check['hallucination_score'])
+            mlflow.log_dict(hallucination_check, "hallucination_check.json")
+            
+            workflow_span.set_attribute("hallucination.score", hallucination_check['hallucination_score'])
             
             workflow_span.set_attribute(SpanAttributes.OUTPUT_VALUE, final_answer)
             workflow_span.set_attribute("agent.agents_used", ", ".join(agents_called) if agents_called else "none")

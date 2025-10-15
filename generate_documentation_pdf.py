@@ -19,8 +19,6 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import urljoin
-import markdown
-from weasyprint import HTML, CSS
 
 import requests
 
@@ -31,8 +29,13 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime, timedelta
 
-from arize.exporter import ArizeExportClient
-from arize.utils.types import Environments
+# Arize is optional; handle absence gracefully
+try:
+    from arize.exporter import ArizeExportClient
+    from arize.utils.types import Environments
+except Exception:
+    ArizeExportClient = None  # type: ignore
+    Environments = None       # type: ignore
 
 
 # =========================
@@ -62,14 +65,12 @@ def fetch_bundles(base_url, headers):
 def filter_bundles_by_project(data, project_id):
     if not data or 'data' not in data:
         return data
-
+    # print(data)
     filtered_bundles = [
         bundle for bundle in data['data']
         if bundle.get('projectId') == project_id and bundle.get('state') == 'Active'
     ]
-
-    filtered_bundles = [max(filtered_bundles, key=lambda b: datetime.fromisoformat(b["createdAt"].replace("Z", "+00:00")))]
-    
+    print(filtered_bundles)
     filtered_data = data.copy()
     filtered_data['data'] = filtered_bundles
     if 'meta' in filtered_data and 'pagination' in filtered_data['meta']:
@@ -81,12 +82,11 @@ def fetch_bundle_drafts(base_url, headers, bundle_id):
     drafts_url = f'{base_url}api/governance/v1/drafts/latest?bundleId={bundle_id}'
     try:
         response = requests.get(drafts_url, headers=headers, timeout=30)
+        print(response.json())
+        exit()
         if response.status_code == 200:
             return response.json()
         else:
-            print(response)
-            print('drafts url', drafts_url)
-            print('headers', headers)
             print(f"Failed to get drafts data: {response.status_code}")
             return None
     except requests.exceptions.RequestException as e:
@@ -134,23 +134,25 @@ def parse_evidence_data(drafts_data):
 # =========================
 
 def generate_markdown_documentation(bundle_data, evidence_data, output_path="governance_documentation.md"):
+    """Generate markdown documentation from bundle and evidence data."""
     bundle = bundle_data['bundle']
     evidence = bundle_data['evidence']
 
-    md: List[str] = []
+    md = []
     md.append(f"# {bundle.get('name', 'AI System')} - Documentation\n")
 
     # Executive Summary
     exec_summary = ""
     for evi_id, evi_data in evidence.items():
         for artifact in evi_data['artifacts']:
-            if artifact.get('content_type') == 'text' and len(artifact.get('text', '')) > 100:
-                t = artifact['text'].lower()
-                if any(w in t for w in ['system', 'designed', 'ai', 'extractor']):
-                    exec_summary = artifact['text'].strip()
+            if artifact.get('content_type') == 'text':
+                text = artifact.get('text', '').strip()
+                if len(text) > 100:
+                    exec_summary = text
                     break
         if exec_summary:
             break
+    
     md.append("## Executive Summary")
     md.append(exec_summary or "Summary not provided.")
     md.append("")
@@ -161,224 +163,277 @@ def generate_markdown_documentation(bundle_data, evidence_data, output_path="gov
     for evi_id, evi_data in evidence.items():
         for artifact in evi_data['artifacts']:
             if artifact.get('content_type') == 'text':
-                t = artifact['text'].lower()
-                if any(w in t for w in ['requirements', 'must', 'should', 'format']):
-                    business_req = artifact['text'].strip()
+                text = artifact.get('text', '').strip()
+                if any(w in text.lower() for w in ['requirements', 'must', 'should']):
+                    business_req = text
                     break
         if business_req:
             break
+    
     md.append(business_req or "—")
     md.append("")
 
     # Business Background and Rationale
     md.append("## Business Background and Rationale")
-    use_case = ""; users = ""; system_type = ""
+    use_case = ""
+    users = ""
+    system_type = ""
+    
     for evi_id, evi_data in evidence.items():
         for artifact in evi_data['artifacts']:
             if artifact.get('content_type') == 'text':
-                text = artifact['text']
-                tl = text.lower()
-                if 'support' in tl and ('analysis' in tl or 'business' in tl):
-                    use_case = text.strip()
-                elif 'team' in tl or 'user' in tl:
-                    users = text.strip()
-                elif 'enhancement' in tl or 'existing' in tl or 'new' in tl:
-                    system_type = text.strip()
+                text = artifact.get('text', '').strip()
+                text_lower = text.lower()
+                
+                if not use_case and any(w in text_lower for w in ['support', 'analysis', 'use']):
+                    use_case = text
+                elif not users and any(w in text_lower for w in ['team', 'user']):
+                    users = text
+                elif not system_type and any(w in text_lower for w in ['enhancement', 'existing', 'new']):
+                    system_type = text
+    
     md.append(f"**Use Case**: {use_case or '—'}\n")
     md.append(f"**Users**: {users or '—'}\n")
     md.append(f"**New/Existing System**: {system_type or '—'}\n")
 
-    # Policies
+    # Policies - handle both string and dict selections
     md.append("## Applicable Policies, Standards, and Procedures")
     policies = []
+    
     for evi_id, evi_data in evidence.items():
         for artifact in evi_data['artifacts']:
             if artifact.get('content_type') == 'multiple_choice':
-                for s in artifact.get('selections', []):
-                    if any(w in s.lower() for w in ['policy', 'governance', 'standard', 'law', 'compliance']):
-                        policies.append(s)
-    for p in sorted(set(policies)): md.append(f"- {p}")
-    if not policies: md.append("- —")
+                selections = artifact.get('selections', [])
+                for item in selections:
+                    if isinstance(item, str):
+                        if any(w in item.lower() for w in ['policy', 'governance', 'standard', 'law', 'compliance']):
+                            policies.append(item)
+                    elif isinstance(item, dict):
+                        # Handle dict selections - extract meaningful values
+                        for key, value in item.items():
+                            if isinstance(value, str) and value:
+                                policies.append(f"{key}: {value}")
+    
+    for p in sorted(set(policies)):
+        md.append(f"- {p}")
+    if not policies:
+        md.append("- —")
     md.append("")
 
     # Functional Requirements
     md.append("## Functional Requirements")
-    func_requirements = set(); data_formats = set()
+    func_requirements = set()
+    data_formats = set()
+    
     for evi_id, evi_data in evidence.items():
         for artifact in evi_data['artifacts']:
             ct = artifact.get('content_type')
+            
             if ct == 'multiple_choice':
-                for s in artifact.get('selections', []):
-                    sl = s.lower()
-                    if any(w in sl for w in ['api', 'csv', 'json', 'endpoint', 'integration']):
-                        func_requirements.add(s)
-                    if any(w in sl for w in ['csv', 'json', 'export', 'data']):
-                        data_formats.add(s)
+                selections = artifact.get('selections', [])
+                for item in selections:
+                    item_text = ""
+                    if isinstance(item, str):
+                        item_text = item
+                    elif isinstance(item, dict):
+                        item_text = ' '.join(str(v) for v in item.values() if v)
+                    
+                    item_lower = item_text.lower()
+                    if any(w in item_lower for w in ['api', 'csv', 'json', 'endpoint', 'integration']):
+                        func_requirements.add(item_text)
+                    if any(w in item_lower for w in ['csv', 'json', 'export', 'data']):
+                        data_formats.add(item_text)
+            
             elif ct == 'text':
-                t = artifact.get('text', '')
-                if any(w in t.lower() for w in ['json', 'csv', 'api', 'endpoint']):
-                    func_requirements.add(t.strip())
-    for r in sorted(func_requirements): md.append(f"- {r}")
-    if data_formats: md.append(f"- Outputs data in {', '.join(sorted(data_formats))}")
-    md.append("- Access control for internal users only\n")
+                text = artifact.get('text', '').strip()
+                if any(w in text.lower() for w in ['json', 'csv', 'api', 'endpoint']):
+                    func_requirements.add(text)
+    
+    for r in sorted(func_requirements):
+        md.append(f"- {r}")
+    if data_formats:
+        md.append(f"- Outputs data in {', '.join(sorted(data_formats))}")
+    if not func_requirements and not data_formats:
+        md.append("- —")
+    md.append("")
 
     # Development Dataset
     md.append("## Development Dataset")
-    data_sources = set(); data_sampling = ""; data_quality = ""; vendor_info = ""
+    data_sources = set()
+    data_sampling = ""
+    data_quality = ""
+    vendor_info = ""
+    
     for evi_id, evi_data in evidence.items():
-        for a in evi_data['artifacts']:
-            ct = a.get('content_type')
+        for artifact in evi_data['artifacts']:
+            ct = artifact.get('content_type')
+            
             if ct == 'multiple_choice':
-                for s in a.get('selections', []):
-                    if any(w in s.lower() for w in ['repository', 'data', 'portfolio', 'internal']):
-                        data_sources.add(s)
+                selections = artifact.get('selections', [])
+                for item in selections:
+                    item_text = ""
+                    if isinstance(item, str):
+                        item_text = item
+                    elif isinstance(item, dict):
+                        item_text = ' '.join(str(v) for v in item.values() if v)
+                    
+                    if any(w in item_text.lower() for w in ['repository', 'data', 'portfolio', 'internal']):
+                        data_sources.add(item_text)
+            
             elif ct == 'text':
-                t = a['text']
-                tl = t.lower()
-                if 'sampled' in tl or 'training' in tl: data_sampling = t.strip()
-                elif 'eda' in tl or 'quality' in tl or 'normalization' in tl: data_quality = t.strip()
-                elif 'vendor' in tl: vendor_info = t.strip()
-    md.append("**Overview**: Pre-approved reports from internal repositories.\n")
-    md.append(f"**Data Sources and Extraction Process**: Reports sourced from {', '.join(sorted(data_sources)) or '—'} transformed using processing pipelines.\n")
-    md.append(f"**Vendor Data/Data Proxies**: {vendor_info or 'No vendor data used; all data sourced internally.'}\n")
+                text = artifact.get('text', '').strip()
+                text_lower = text.lower()
+                
+                if not data_sampling and any(w in text_lower for w in ['sampled', 'training']):
+                    data_sampling = text
+                elif not data_quality and any(w in text_lower for w in ['eda', 'quality', 'normalization']):
+                    data_quality = text
+                elif not vendor_info and 'vendor' in text_lower:
+                    vendor_info = text
+    
+    md.append("**Overview**: Pre-approved data from internal sources.\n")
+    md.append(f"**Data Sources**: {', '.join(sorted(data_sources)) or '—'}\n")
+    md.append(f"**Vendor Data**: {vendor_info or 'No vendor data used; all data sourced internally.'}\n")
     md.append(f"**Data Sampling**: {data_sampling or '—'}\n")
     md.append(f"**Data Quality**: {data_quality or '—'}\n")
 
     # Methodology
     md.append("## Methodology, Theory and Approach")
-    methodology = ""; limitations = ""
+    methodology = ""
+    limitations = ""
+    
     for evi_id, evi_data in evidence.items():
-        for a in evi_data['artifacts']:
-            if a.get('content_type') == 'text':
-                t = a['text']; tl = t.lower()
-                if any(w in tl for w in ['utilizes', 'parsing', 'nlp', 'ocr', 'extraction', 'approach']):
-                    methodology = t.strip()
-                elif any(w in tl for w in ['error', 'risk', 'limitation', 'mitigated']):
-                    limitations = t.strip()
+        for artifact in evi_data['artifacts']:
+            if artifact.get('content_type') == 'text':
+                text = artifact.get('text', '').strip()
+                text_lower = text.lower()
+                
+                if not methodology and any(w in text_lower for w in ['utilizes', 'parsing', 'nlp', 'approach']):
+                    methodology = text
+                elif not limitations and any(w in text_lower for w in ['error', 'risk', 'limitation']):
+                    limitations = text
+    
     md.append(f"**Description**: {methodology or '—'}\n")
     md.append(f"**Limitations and Risks**: {limitations or '—'}\n")
 
     # System Calibration
     md.append("## System Calibration")
-    assumptions = ""; github_repo = ""
+    assumptions = ""
+    github_repo = ""
+    
     for evi_id, evi_data in evidence.items():
-        for a in evi_data['artifacts']:
-            if a.get('content_type') == 'text':
-                t = a['text']; tl = t.lower()
-                if 'documents are' in tl or 'assumption' in tl: assumptions = t.strip()
-                if 'github' in tl and not github_repo: github_repo = t.strip()
-    md.append(f"**Development Code**: {github_repo or 'Located at internal repository; modular structure for parsing, extraction, output.'}\n")
+        for artifact in evi_data['artifacts']:
+            if artifact.get('content_type') == 'text':
+                text = artifact.get('text', '').strip()
+                text_lower = text.lower()
+                
+                if not assumptions and 'assumption' in text_lower:
+                    assumptions = text
+                if not github_repo and 'github' in text_lower:
+                    github_repo = text
+    
+    md.append(f"**Development Code**: {github_repo or 'Located at internal repository'}\n")
     md.append(f"**Key System Assumptions**: {assumptions or '—'}\n")
 
     # Developer Testing
     md.append("## Developer Testing")
-    test_results: List[str] = []
+    test_results = []
+    
     for evi_id, evi_data in evidence.items():
-        for a in evi_data['artifacts']:
-            if a.get('content_type') == 'text':
-                t = a['text'].strip(); tl = t.lower()
-                if any(w in tl for w in ['accuracy', 'test', 'performance', 'achieved', 'maintained', 'outperformed', 'stress']):
-                    test_results.append(t)
-    for r in test_results:
-        rl = r.lower()
-        if 'training' in rl:
-            md.append(f"**In-Sample Back Testing Analysis**: {r}")
-        elif 'test' in rl and 'training' not in rl:
-            md.append(f"**Out-of-Sample Back Testing Analysis**: {r}")
-        elif 'outperformed' in rl or 'manual' in rl:
-            md.append(f"**Benchmarking/Challenger Tool Analyses**: {r}")
-        elif 'stress' in rl:
-            md.append(f"**Additional Testing**: {r}")
-    if not test_results: md.append("—")
+        for artifact in evi_data['artifacts']:
+            if artifact.get('content_type') == 'text':
+                text = artifact.get('text', '').strip()
+                text_lower = text.lower()
+                if any(w in text_lower for w in ['accuracy', 'test', 'performance', 'achieved']):
+                    test_results.append(text)
+    
+    if test_results:
+        for result in test_results:
+            md.append(f"- {result}")
+    else:
+        md.append("—")
     md.append("")
 
     # Governance
     md.append("## Governance")
     md.append("**Ethical Considerations**:")
-    security_measures = []
-    for evi_id, evi_data in evidence.items():
-        for a in evi_data['artifacts']:
-            if a.get('content_type') == 'multiple_choice':
-                for s in a.get('selections', []):
-                    if any(w in s.lower() for w in ['validation', 'security', 'access', 'authentication']):
-                        security_measures.append(s)
     md.extend([
-        "- **Fairness**: No risk of discrimination; only financial data processed.",
-        "- **Safety**: No personal data; complies with internal and external regulations.",
-        f"- **Security**: Restricted to internal access; {', '.join(sorted(set(security_measures))) or '—'}.",
-        "- **Robustness**: Output accuracy monitored; retraining scheduled annually.",
-        "- **Explainability**: Processing steps logged and reviewable by analysts.",
-        "- **Transparency**: System functionality documented for users.",
-        "- **Governance**: Roles assigned per organizational AI Governance Guidance.",
+        "- **Fairness**: No risk of discrimination",
+        "- **Safety**: Complies with internal and external regulations",
+        "- **Security**: Restricted to internal access",
+        "- **Robustness**: Output accuracy monitored regularly",
+        "- **Explainability**: Processing steps logged and reviewable",
+        "- **Transparency**: System functionality documented",
+        "- **Governance**: Roles assigned per organizational guidance",
         ""
     ])
 
     # Risk Monitoring Plan
     md.append("## Risk Monitoring Plan")
-    risks = ["Processing errors", "Data quality issues", "Unauthorized access"]
-    metrics = ["Processing accuracy", "Input format validation", "Access logs"]
-    md.append(f"**Risks**: {', '.join(risks)}\n")
-    md.append(f"**Metrics**: {', '.join(metrics)}\n")
-    md.append("**Review**: Monthly dashboard; integrated with internal monitoring tools\n")
+    md.append("**Risks**: Processing errors, Data quality issues, Unauthorized access\n")
+    md.append("**Metrics**: Processing accuracy, Input validation, Access logs\n")
+    md.append("**Review**: Monthly dashboard review\n")
 
     # Lessons Learned
     md.append("## Lessons Learned and Future Enhancements")
-    enhancements: List[str] = []
-    # Avoid the [1:] bug in prior code
+    enhancements = []
+    
     for evi_id, evi_data in evidence.items():
-        for a in evi_data['artifacts']:
-            if a.get('content_type') == 'text':
-                tl = a['text'].lower()
-                if any(w in tl for w in ['improved', 'plan', 'expand', 'enhance', 'future']):
-                    enhancements.append(a['text'].strip())
-    for e in enhancements:
-        md.append(f"- {e}")
-    if not enhancements:
+        for artifact in evi_data['artifacts']:
+            if artifact.get('content_type') == 'text':
+                text = artifact.get('text', '').strip()
+                if any(w in text.lower() for w in ['improved', 'plan', 'expand', 'enhance', 'future']):
+                    enhancements.append(text)
+    
+    if enhancements:
+        for e in enhancements:
+            md.append(f"- {e}")
+    else:
         md.append("- —")
     md.append("")
 
     # Deployment
     md.append("## Deployment Specification")
-    technical_req = ""; access_info = ""
+    technical_req = ""
+    access_info = ""
+    
     for evi_id, evi_data in evidence.items():
-        for a in evi_data['artifacts']:
-            if a.get('content_type') == 'text':
-                t = a['text']; tl = t.lower()
-                if any(w in tl for w in ['hosted', 'server', 'endpoint']):
-                    technical_req = t.strip()
-                elif 'access' in tl and any(w in tl for w in ['api', 'rest', 'redshift']):
-                    access_info = t.strip()
-    md.append(f"**Technical Requirements**: {technical_req or 'Hosted on internal servers; API/Web UI endpoints'}\n")
-    md.append("**Architecture Diagram**: [Insert data flow architecture]\n")
-    md.append("**Process Flow Diagram**: [Insert workflow diagram]\n")
-    md.append(f"**Engineering Interface**: {access_info or 'API location, monitoring dashboard integration'}\n")
-    md.append("**Implementation Code**: Repository at [internal location]\n")
-    md.append("**Production and Testing Environment Access**: Access via internal roles\n")
-    md.append("**Upstream and Downstream Models/Applications/Dependencies**: Upstream: internal repositories; Downstream: analytics dashboards\n")
-    md.append("**User Acceptance Testing ('UAT')**: UAT completed; summary available in documentation\n")
-    md.append("**Retention and Back Up**: Custom retention policy for processed data; backups at [internal location]\n")
-    md.append("**User Guides (if applicable)**: Step-by-step guide attached\n")
-    md.append("**Other**: Data dictionary and technical specs attached\n")
+        for artifact in evi_data['artifacts']:
+            if artifact.get('content_type') == 'text':
+                text = artifact.get('text', '').strip()
+                text_lower = text.lower()
+                
+                if not technical_req and any(w in text_lower for w in ['hosted', 'server', 'endpoint']):
+                    technical_req = text
+                elif not access_info and 'access' in text_lower:
+                    access_info = text
+    
+    md.append(f"**Technical Requirements**: {technical_req or 'Hosted on internal infrastructure'}\n")
+    md.append(f"**Engineering Interface**: {access_info or 'API endpoints available'}\n")
+    md.append("**Implementation Code**: Repository at internal location\n")
+    md.append("**Production Access**: Access via internal roles\n")
 
-    # Attachments from evidence
+    # Attachments
     files_found = []
     for evi_id, evi_data in evidence.items():
         for artifact in evi_data['artifacts']:
-            if artifact.get('content_type') == 'file_upload' and artifact.get('files'):
-                files_found.extend(artifact['files'])
+            if artifact.get('content_type') == 'file_upload':
+                files = artifact.get('files', [])
+                files_found.extend(files)
+    
     if files_found:
         md.append("## Attachments")
         for f in files_found:
             md.append(f"- {f.get('name')} ({f.get('sizeLabel')}) - {f.get('path')}")
         md.append("")
 
-    # Write base file
+    # Write file
     final_content = '\n'.join(md)
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(final_content)
+    
     print(f"Documentation saved to: {output_path}")
     return output_path
-
 
 # =========================
 # Dashboard (plots) bits
@@ -590,7 +645,7 @@ def build_dashboard(df: pd.DataFrame) -> plt.Figure:
 def generate_dashboard_png(output_dir: Path) -> Optional[Path]:
     api = os.getenv("ARIZE_API_KEY", "")
     space = os.getenv("ARIZE_SPACE_ID", "")
-    model = os.getenv("ARIZE_PROJECT_NAME", "")
+    model = os.getenv("ARIZE_PROJECT_NAME", "Agent-POC")
     days_back = int(os.getenv("DAYS_BACK", "7"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -598,68 +653,129 @@ def generate_dashboard_png(output_dir: Path) -> Optional[Path]:
     df: Optional[pd.DataFrame] = None
     if api and space and model:
         df = pull_arize_data(api, space, model, days_back)
-        df = clean(df)
-        fig = build_dashboard(df)
-        out = output_dir / "ai_governance_dashboard_lite.png"
-        fig.savefig(out, dpi=300, bbox_inches="tight", facecolor="white", edgecolor="none", pad_inches=0.3)
-        plt.close(fig)
-        print(f"Saved dashboard: {out}")
-        return out
-        
-    print('did not save arize dashboard')
-    return None
+        print(df)
+    
+    df = clean(df)
+    fig = build_dashboard(df)
+    out = output_dir / "ai_governance_dashboard_lite.png"
+    fig.savefig(out, dpi=300, bbox_inches="tight", facecolor="white", edgecolor="none", pad_inches=0.3)
+    plt.close(fig)
+    print(f"Saved dashboard: {out}")
+    return out
 
 
+# =========================
+# Orchestration
+# =========================
 
-def save_bundle_summary(bundles, base_url):
+def print_organized_evidence(evidence_groups):
+    print(f"\nORGANIZED EVIDENCE DATA FOR PDF GENERATION")
+    print(f"Found {len(evidence_groups)} evidence sections")
+    for i, (evidence_id, evidence) in enumerate(evidence_groups.items(), 1):
+        print(f"\n{'='*80}")
+        print(f"EVIDENCE SECTION {i}")
+        print(f"Evidence ID: {evidence_id}")
+        print(f"Last Updated: {evidence['updated_at']}")
+        print(f"Number of Artifacts: {len(evidence['artifacts'])}")
+        print(f"{'='*80}")
+        for j, artifact in enumerate(evidence['artifacts'], 1):
+            print(f"\n  Artifact {j}")
+            print(f"      Artifact ID: {artifact.get('artifact_id')}")
+            print(f"      Content Type: {artifact.get('content_type')}")
+            print(f"      Updated: {artifact.get('updated_at')}")
+            if artifact.get('content_type') == 'text':
+                content = artifact.get('text', '')
+                print(f"      Content: {content[:200]}..." if len(content) > 200 else f"      Content: {content}")
+            elif artifact.get('content_type') == 'multiple_choice':
+                print(f"      Selections: {artifact.get('selections')}")
+            elif artifact.get('content_type') == 'file_upload':
+                files = artifact.get('files', [])
+                print(f"      Files ({len(files)}):")
+                for f in files:
+                    print(f"        - {f.get('name')} ({f.get('sizeLabel')})")
+                    print(f"          Path: {f.get('path')}")
+            elif artifact.get('content_type') == 'structured_data':
+                print(f"      Structured Data: {artifact.get('content')}")
+
+
+def print_bundle_summary(bundles):
     if not bundles:
         print("No active bundles found for this project.")
         return {}
 
+    base_url = 'https://fitch.domino-eval.com/'
     headers = get_auth_headers()
 
     print(f"\n=== COMPREHENSIVE GOVERNANCE BUNDLE ANALYSIS ===")
     print(f"Total active bundles: {len(bundles)}")
 
     all_evidence_data = {}
-    
+
     for i, bundle in enumerate(bundles, 1):
         bundle_id = bundle.get('id')
         print(f"\n{'='*80}")
         print(f"COMPREHENSIVE BUNDLE REPORT: {bundle.get('name', 'Unnamed')}")
+        print(f"{'='*80}")
+
+        print(f"\nBASIC INFORMATION")
+        print(f"Bundle ID: {bundle_id}")
+        print(f"State: {bundle.get('state', 'Unknown')}")
+        print(f"Current Stage: {bundle.get('stage', 'Unknown')}")
+        print(f"Policy: {bundle.get('policyName', 'Unknown')}")
+        print(f"Classification: {bundle.get('classificationValue', 'None')}")
+        print(f"Project: {bundle.get('projectName', 'N/A')} (Owner: {bundle.get('projectOwner', 'N/A')})")
+
+        created_by = bundle.get('createdBy', {})
+        creator_name = f"{created_by.get('firstName', '')} {created_by.get('lastName', '')}".strip()
+        print(f"Created: {bundle.get('createdAt', 'Unknown')} by {creator_name}")
 
         print(f"\nFETCHING EVIDENCE DATA FROM DRAFTS")
         drafts_data = fetch_bundle_drafts(base_url, headers, bundle_id)
-
+        print('drafts_data', drafts_data)
+        exit()
+        
         if drafts_data:
             print(f"Successfully retrieved {len(drafts_data)} evidence items")
             evidence_groups = parse_evidence_data(drafts_data)
+            # print_organized_evidence(evidence_groups)
+            print(evidence_groups)
             all_evidence_data[bundle_id] = {'bundle': bundle, 'evidence': evidence_groups}
         else:
             print("No evidence data found")
+
+        stages = bundle.get('stages', [])
+        if stages:
+            print(f"\nGOVERNANCE STAGES ({len(stages)})")
+            for stage_num, stage in enumerate(stages, 1):
+                info = stage.get('stage', {})
+                name = info.get('name', 'Unknown')
+                print(f"  {stage_num}. {name}")
+                print(f"     Stage ID: {info.get('id', 'N/A')}")
+                if name == bundle.get('stage'):
+                    print(f"     CURRENT STAGE")
 
         if i < len(bundles):
             print(f"\n{'-'*80}\nNEXT BUNDLE\n{'-'*80}")
 
     print(f"\nPDF GENERATION SUMMARY")
     print(f"Ready to generate PDFs for {len(all_evidence_data)} bundles")
-    for bid, data in all_evidence_data.items():
-        print(f"  - {data['bundle'].get('name', 'Unnamed')}: {len(data['evidence'])} evidence sections")
 
     print(f"\nGENERATING MARKDOWN DOCUMENTATION")
-    output_paths = []
     for bid, data in all_evidence_data.items():
         bundle_name = data['bundle'].get('name', 'Unnamed')
         safe_filename = "".join(c for c in bundle_name if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
-        output_path = f"/mnt/artifacts/{safe_filename}_documentation.md"
-        output_paths.append(output_path)
-        generated_file = generate_markdown_documentation(data, data['evidence'], output_path)
+        output_path = f"{safe_filename}_documentation.md"
+        print(f"Creating documentation for: {bundle_name}")
+        generated_file_path = generate_markdown_documentation(data, data['evidence'], output_path)
+        print(f"Saved: {generated_file_path}")
 
-        out_dir = Path(os.getenv("OUTPUT_DIR", "/mnt/artifacts"))
-        png_path = generate_dashboard_png(out_dir)
-        append_dashboard_section(generated_file, png_path)
+        # ---- NEW: append dashboard plots to each Markdown ----
+        # out_dir = Path(os.getenv("OUTPUT_DIR", "/mnt/artifacts"))
+        # png_path = generate_dashboard_png(out_dir)
+        # if png_path:
+        #     append_dashboard_section(generated_file, png_path)
 
-    return all_evidence_data, output_paths[0]
+    return all_evidence_data, generated_file_path
 
 
 def append_dashboard_section(markdown_file: str, png_path: Path) -> None:
@@ -686,12 +802,15 @@ def append_dashboard_section(markdown_file: str, png_path: Path) -> None:
     print(f"Appended dashboard section to: {markdown_file}")
 
 
-def generate_markdown():
+def main():
     base_url = 'https://fitch.domino-eval.com/'
     project_id = os.getenv('DOMINO_PROJECT_ID')
+    if not project_id:
+        print("Error: DOMINO_PROJECT_ID environment variable not found.", file=sys.stderr)
+        print("Make sure you're running this script within a Domino project environment.", file=sys.stderr)
+        sys.exit(1)
 
     print(f"Filtering active bundles for project ID: {project_id}", file=sys.stderr)
-
     headers = get_auth_headers()
     data = fetch_bundles(base_url, headers)
     if data is None:
@@ -701,17 +820,27 @@ def generate_markdown():
     total_bundles = len(data.get('data', []))
     active_bundles = len(filtered_data.get('data', []))
     print(f"Found {active_bundles} active bundles out of {total_bundles} total bundles for this project.", file=sys.stderr)
+    print(filtered_data)
+    file_path = print_bundle_summary(filtered_data.get('data', []))
 
-    all_evidence_data, output_path = save_bundle_summary(filtered_data.get('data', []), base_url)
-    return output_path
 
 
-def convert_to_pdf(output_path):
-    print(output_path)
+def main2():
+    import sys
+    from pathlib import Path
+
+    try:
+        import markdown
+        from weasyprint import HTML, CSS
+    except ImportError as e:
+        print("Missing packages. Install with:", file=sys.stderr)
+        print("  pip install markdown weasyprint", file=sys.stderr)
+        sys.exit(1)
+
     # Hardcoded Domino paths
-    INPUT_MD  = Path(output_path)
-    OUTPUT_PDF = Path("/mnt/artifacts/final_governance_report.pdf")
-    LETTERHEAD = Path("/mnt/code/images/letterhead.png")
+    INPUT_MD  = Path("/mnt/code/HelpBot_v23_Internal_Policy_Update_documentation.md")
+    OUTPUT_PDF = Path("/mnt/artifacts/governance_report.pdf")
+    LETTERHEAD = Path("/mnt/code/images/letterhead.png")  # your Domino letterhead
 
     if not INPUT_MD.exists():
         print(f"ERROR: {INPUT_MD} not found.", file=sys.stderr)
@@ -835,13 +964,5 @@ def convert_to_pdf(output_path):
 
 
 if __name__ == "__main__":
-    output_path = generate_markdown()
-    convert_to_pdf(output_path)
-
-    # for key, value in os.environ.items():
-    #     if 'domino' in key.lower():
-    #         print(f"{key}={value}")
-    # print('-'*80)
-    # for key, value in os.environ.items():
-    #     if 'rest' in key.lower():
-    #         print(f"{key}={value}")
+    main()
+    # main2()
