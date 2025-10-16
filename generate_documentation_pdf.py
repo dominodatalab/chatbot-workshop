@@ -424,22 +424,6 @@ def pull_arize_data(api_key: str, space_id: str, model_id: str, days_back: int) 
         print(f"Arize pull failed: {e}", file=sys.stderr)
         return None
 
-def list_artifacts_dir():
-    """Print contents of /mnt/artifacts directory"""
-    artifacts_path = Path("/mnt/artifacts")
-    print(f"\n{'='*80}")
-    print("CONTENTS OF /mnt/artifacts")
-    print(f"{'='*80}")
-    
-    if not artifacts_path.exists():
-        print("Directory does not exist yet")
-        return
-    
-    for item in sorted(artifacts_path.iterdir()):
-        size = item.stat().st_size if item.is_file() else "DIR"
-        print(f"  {item.name:50s} {size:>15}")
-    print()
-
 def clean(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["start_time"] = pd.to_datetime(df["start_time"])
@@ -720,10 +704,7 @@ def print_bundle_summary(bundles):
         
         if png_path:
             append_dashboard_section(generated_file, png_path)
-    
-    # List what we created
-    list_artifacts_dir()
-    
+        
     return all_evidence_data, png_path
 
 
