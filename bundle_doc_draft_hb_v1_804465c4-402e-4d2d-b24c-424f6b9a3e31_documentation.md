@@ -1,4 +1,4 @@
-# HelpBot v2 update - Documentation
+# draft hb v1 - Documentation
 
 ## Executive Summary
 Summary not provided.
@@ -17,15 +17,12 @@ Summary not provided.
 - —
 
 ## Functional Requirements
-- API
-- Database Integration
-- Outputs data in Database Integration
 - Access control for internal users only
 
 ## Development Dataset
 **Overview**: Pre-approved reports from internal repositories.
 
-**Data Sources and Extraction Process**: Reports sourced from Database Integration, Internal Video Library transformed using processing pipelines.
+**Data Sources and Extraction Process**: Reports sourced from — transformed using processing pipelines.
 
 **Vendor Data/Data Proxies**: No vendor data used; all data sourced internally.
 
@@ -44,7 +41,7 @@ Summary not provided.
 **Key System Assumptions**: —
 
 ## Developer Testing
-**Out-of-Sample Back Testing Analysis**: Testing
+—
 
 ## Governance
 **Ethical Considerations**:

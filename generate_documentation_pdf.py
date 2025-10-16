@@ -8,7 +8,7 @@ Domino Governance → Markdown generator + Visual Dashboard appender
 Env (Domino):
   DOMINO_PROJECT_ID, DOMINO_USER_API_KEY (or DOMINO_API_KEY)
 Optional (Arize):
-  ARIZE_API_KEY, ARIZE_SPACE_ID, ARIZE_PROJECT_NAME, DAYS_BACK, OUTPUT_DIR
+  ARIZE_API_KEY, ARIZE_SPACE_ID, ARIZE_MODEL_IDS (comma-separated), DAYS_BACK, OUTPUT_DIR
 """
 
 from __future__ import annotations
@@ -320,7 +320,6 @@ def generate_markdown_documentation(bundle_data, evidence_data, output_path="gov
     # Lessons Learned
     md.append("## Lessons Learned and Future Enhancements")
     enhancements: List[str] = []
-    # Avoid the [1:] bug in prior code
     for evi_id, evi_data in evidence.items():
         for a in evi_data['artifacts']:
             if a.get('content_type') == 'text':
@@ -413,11 +412,6 @@ def pull_arize_data(api_key: str, space_id: str, model_id: str, days_back: int) 
         df = client.export_model_to_df(
             space_id=space_id, model_id=model_id, environment=Environments.TRACING,
             start_time=start_time, end_time=end_time,
-            # columns=[
-            #     "context.span_id","attributes.llm.model_name","attributes.llm.provider",
-            #     "attributes.llm.token_count.total","attributes.llm.token_count.prompt",
-            #     "attributes.llm.token_count.completion","status_code","start_time","end_time","name",
-            # ],
         )
         return df
     except Exception as e:
@@ -425,6 +419,15 @@ def pull_arize_data(api_key: str, space_id: str, model_id: str, days_back: int) 
         return None
 
 def clean(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean and prepare dataframe."""
+    if df is None or df.empty:
+        # Return empty df with expected columns
+        return pd.DataFrame({
+            'start_time': [], 'end_time': [], 'hour': [], 'duration_s': [],
+            'attributes.llm.token_count.total': [], 'status_code': [],
+            'attributes.llm.model_name': [], 'attributes.llm.provider': []
+        })
+    
     df = df.copy()
     df["start_time"] = pd.to_datetime(df["start_time"])
     df["end_time"] = pd.to_datetime(df["end_time"])
@@ -435,6 +438,11 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def kpis(df: pd.DataFrame) -> Dict[str, float]:
+    if df.empty:
+        return {
+            "total_requests": 0.0, "success_rate": 0.0, "total_tokens": 0.0,
+            "avg_tokens": 0.0, "active_models": 0.0, "peak_hour": 0.0, "avg_quality": 0.0
+        }
     return {
         "total_requests": float(len(df)),
         "success_rate": float((df["status_code"].eq("OK")).mean() * 100),
@@ -447,6 +455,8 @@ def kpis(df: pd.DataFrame) -> Dict[str, float]:
     }
 
 def proxy_response_quality(df: pd.DataFrame) -> Dict[str, float]:
+    if df.empty:
+        return {"Coherence": 0.0, "Relevance": 0.0, "Helpfulness": 0.0}
     dur = 1 - (df["duration_s"].clip(0, 30) / 30)
     ok = df["status_code"].eq("OK").astype(float)
     tok = 1 - (df["attributes.llm.token_count.total"].clip(0, 2500) / 2500)
@@ -457,11 +467,16 @@ def proxy_response_quality(df: pd.DataFrame) -> Dict[str, float]:
     }
 
 def proxy_bias_groups(df: pd.DataFrame) -> Dict[str, float]:
-    q = proxy_response_quality(df); base = (q["Coherence"] + q["Relevance"] + q["Helpfulness"]) / 3
+    if df.empty:
+        return {"Group A": 0.0, "Group B": 0.0}
+    q = proxy_response_quality(df)
+    base = (q["Coherence"] + q["Relevance"] + q["Helpfulness"]) / 3
     means = df.groupby("attributes.llm.provider")["attributes.llm.token_count.total"].mean()
-    if len(means) < 2: return {"Group A": base, "Group B": base}
+    if len(means) < 2:
+        return {"Group A": base, "Group B": base}
     mn, mx = means.min(), means.max()
-    if mx == mn: return {"Group A": base, "Group B": base}
+    if mx == mn:
+        return {"Group A": base, "Group B": base}
     gap = (mx - mn) / mx
     return {"Group A": base, "Group B": max(0.0, base * (1 - 0.2 * gap))}
 
@@ -476,7 +491,8 @@ def kpi_band(ax: plt.Axes, df: pd.DataFrame) -> None:
         ("PEAK HOUR", f"{int(m['peak_hour'])}:00"),
         ("AVG QUALITY", f"{m['avg_quality']:.1f}%"),
     ]
-    ax.axis("off"); x0, dx = 0.015, 0.14
+    ax.axis("off")
+    x0, dx = 0.015, 0.14
     for i, (label, value) in enumerate(items):
         ax.text(x0 + i * dx, 0.68, label, transform=ax.transAxes, fontsize=9.5, color=FS_COLORS["neutral_gray"])
         ax.text(x0 + i * dx, 0.30, value, transform=ax.transAxes, fontsize=16, fontweight="bold", color=FS_COLORS["primary_blue"])
@@ -485,21 +501,32 @@ def pie_model_usage(ax: plt.Axes, df: pd.DataFrame) -> None:
     counts = df["attributes.llm.model_name"].value_counts()
     ax.clear()
     if counts.empty:
-        ax.axis("off"); ax.text(0.5, 0.5, "No data", ha="center", va="center"); return
+        ax.axis("off")
+        ax.text(0.5, 0.5, "No data", ha="center", va="center")
+        return
     colors = FS_PALETTE[: len(counts)]
     wedges, texts, autotexts = ax.pie(counts.values, labels=counts.index, autopct="%1.1f%%",
                                       colors=colors, startangle=90, textprops={"fontsize": 9})
-    for t in autotexts: t.set_color("white"); t.set_fontweight("bold")
+    for t in autotexts:
+        t.set_color("white")
+        t.set_fontweight("bold")
     ax.set_title("Model Usage Distribution", loc="left", color=FS_COLORS["primary_blue"])
 
 def line_tokens_by_hour(ax: plt.Axes, df: pd.DataFrame) -> None:
+    if df.empty:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        return
     hourly = df.groupby("hour")["attributes.llm.token_count.total"].sum()
     ax.plot(hourly.index, hourly.values, marker="o", linewidth=2)
     ax.fill_between(hourly.index, hourly.values, alpha=0.12)
     ax.set_title("Token Usage by Hour", loc="left", color=FS_COLORS["primary_blue"])
-    ax.set_xlabel("Hour"); ax.set_ylabel("Total Tokens")
+    ax.set_xlabel("Hour")
+    ax.set_ylabel("Total Tokens")
 
 def bar_system_health(ax: plt.Axes, df: pd.DataFrame) -> None:
+    if df.empty:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        return
     counts = df["status_code"].value_counts()
     colors = [FS_COLORS["success_green"] if k == "OK" else FS_COLORS["danger_red"] for k in counts.index]
     bars = ax.bar(counts.index, counts.values, color=colors, alpha=0.9, edgecolor="white", linewidth=1.2)
@@ -510,17 +537,25 @@ def bar_system_health(ax: plt.Axes, df: pd.DataFrame) -> None:
     ax.set_ylabel("Requests")
 
 def hist_tokens(ax: plt.Axes, df: pd.DataFrame) -> None:
+    if df.empty:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        return
     vals = df.loc[df["attributes.llm.token_count.total"] > 0, "attributes.llm.token_count.total"]
+    if vals.empty:
+        ax.text(0.5, 0.5, "No token data", ha="center", va="center", transform=ax.transAxes)
+        return
     ax.hist(vals, bins=20, alpha=0.8, edgecolor="white")
     mean_v = float(vals.mean()) if len(vals) else 0
     ax.axvline(mean_v, linestyle="--", linewidth=2, label=f"Mean: {mean_v:.0f}")
     ax.legend(loc="upper right")
     ax.set_title("Token Usage Distribution", loc="left", color=FS_COLORS["primary_blue"])
-    ax.set_xlabel("Tokens/Request"); ax.set_ylabel("Frequency")
+    ax.set_xlabel("Tokens/Request")
+    ax.set_ylabel("Frequency")
 
 def bars_response_quality(ax: plt.Axes, df: pd.DataFrame) -> None:
     scores = proxy_response_quality(df)
-    labels = list(scores.keys()); values = [scores[k] for k in labels]
+    labels = list(scores.keys())
+    values = [scores[k] for k in labels]
     bars = ax.bar(labels, values)
     for b, v in zip(bars, values):
         ax.text(b.get_x() + b.get_width()/2, v + 1, f"{v:.1f}%", ha="center", va="bottom", fontweight="bold", fontsize=9)
@@ -530,7 +565,8 @@ def bars_response_quality(ax: plt.Axes, df: pd.DataFrame) -> None:
 
 def bars_bias_detection(ax: plt.Axes, df: pd.DataFrame) -> None:
     grp = proxy_bias_groups(df)
-    labels = list(grp.keys()); values = [grp[k] for k in labels]
+    labels = list(grp.keys())
+    values = [grp[k] for k in labels]
     bars = ax.bar(labels, values)
     for b, v in zip(bars, values):
         ax.text(b.get_x() + b.get_width()/2, v + 1, f"{v:.1f}%", ha="center", va="bottom", fontweight="bold", fontsize=9)
@@ -569,22 +605,23 @@ def build_dashboard(df: pd.DataFrame) -> plt.Figure:
     return fig
 
 def generate_dashboard_png(output_dir: Path) -> Optional[Path]:
+    """Generate single dashboard."""
     api = os.getenv("ARIZE_API_KEY", "")
     space = os.getenv("ARIZE_SPACE_ID", "")
     model = os.getenv("ARIZE_PROJECT_NAME", "")
     days_back = int(os.getenv("DAYS_BACK", "70"))
+    
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Pull real data if possible
     df: Optional[pd.DataFrame] = None
     if api and space and model:
         df = pull_arize_data(api, space, model, days_back)
-        print('worked')
-        print(df)
-
+    
+    # Clean data (handles None/empty)
     df = clean(df)
-    print(df)
-    # exit()
+    
+    # Build and save
     fig = build_dashboard(df)
     out = output_dir / "ai_governance_dashboard_lite.png"
     fig.savefig(out, dpi=300, bbox_inches="tight", facecolor="white", edgecolor="none", pad_inches=0.3)
@@ -630,7 +667,7 @@ def print_organized_evidence(evidence_groups):
 def print_bundle_summary(bundles):
     if not bundles:
         print("No active bundles found for this project.")
-        return {}
+        return {}, None
 
     base_url = 'https://fitch.domino-eval.com/'
     headers = get_auth_headers()
@@ -684,24 +721,24 @@ def print_bundle_summary(bundles):
             print(f"\n{'-'*80}\nNEXT BUNDLE\n{'-'*80}")
 
     print(f"\nGENERATING MARKDOWN DOCUMENTATION")
-    png_path = None
     
+    # Generate single dashboard once for all bundles
+    out_dir = Path(os.getenv("OUTPUT_DIR", "/mnt/artifacts"))
+    png_path = generate_dashboard_png(out_dir)
+    print('data', all_evidence_data)
+    # Generate markdown for each bundle
     for bid, data in all_evidence_data.items():
         bundle_name = data['bundle'].get('name', 'Unnamed')
         safe_filename = "".join(c for c in bundle_name if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
         
-        # FIX: Use bundle ID to ensure unique filenames
-        output_path = f"{safe_filename}_{bid}_documentation.md"
+        # Use bundle ID to ensure unique filenames
+        output_path = f"bundle_doc_{safe_filename}_{bid}_documentation.md"
         
         print(f"Creating documentation for: {bundle_name}")
         generated_file = generate_markdown_documentation(data, data['evidence'], output_path)
         print(f"Saved: {generated_file}")
-
-        # Generate dashboard once (or per bundle if you want separate dashboards)
-        if png_path is None:
-            out_dir = Path(os.getenv("OUTPUT_DIR", "/mnt/artifacts"))
-            png_path = generate_dashboard_png(out_dir)
         
+        # Append same dashboard to each bundle's markdown
         if png_path:
             append_dashboard_section(generated_file, png_path)
         
@@ -751,14 +788,12 @@ def main():
     active_bundles = len(filtered_data.get('data', []))
     print(f"Found {active_bundles} active bundles out of {total_bundles} total bundles for this project.", file=sys.stderr)
 
-    print_bundle_summary(filtered_data.get('data', []))
+    return print_bundle_summary(filtered_data.get('data', []))
 
 
-
-def main2():
-    import sys
+def main2(doc_paths):
     from pathlib import Path
-
+    
     try:
         import markdown
         from weasyprint import HTML, CSS
@@ -767,156 +802,160 @@ def main2():
         print("  pip install markdown weasyprint", file=sys.stderr)
         sys.exit(1)
 
-    # Hardcoded Domino paths
-    INPUT_MD  = Path("/mnt/code/governance_documentation.md")
-    OUTPUT_PDF = Path("/mnt/artifacts/governance_report.pdf")
-    LETTERHEAD = Path("/mnt/code/images/letterhead.png")
-    DASHBOARD = Path("/mnt/artifacts/ai_governance_dashboard_lite.png")
+    # Paths
+    CODE_DIR = Path("/mnt/code")
+    ARTIFACTS_DIR = Path("/mnt/artifacts")
+    LETTERHEAD = CODE_DIR / "images/letterhead.png"
 
-    if not INPUT_MD.exists():
-        print(f"ERROR: {INPUT_MD} not found.", file=sys.stderr)
-        sys.exit(1)
     if not LETTERHEAD.exists():
         print(f"WARNING: Letterhead not found at {LETTERHEAD}", file=sys.stderr)
 
-    CSS_STYLES = f"""
-    @page {{
+    # Find all generated markdown files
+    md_files = list(CODE_DIR.glob("*_documentation.md"))
+    print(md_files)
+    if not md_files:
+        print("ERROR: No *_documentation.md files found.", file=sys.stderr)
+        sys.exit(1)
+    
+    print(f"\nFound {len(md_files)} markdown file(s) to convert:")
+    for md_file in md_files:
+        print(f"  - {md_file.name}")
+
+    CSS_STYLES = """
+    @page {
       size: Letter;
       margin: 1.5in 1in 1in 1in;
-      @top-center {{
+      @top-center {
         content: element(doc-header);
         vertical-align: top;
         margin-bottom: 0.2in;
-      }}
-      @bottom-center {{
+      }
+      @bottom-center {
         content: counter(page) " / " counter(pages);
         font-size: 9pt;
         color: #555;
-      }}
-    }}
+      }
+    }
     
-    body {{
+    body {
       font-family: "DejaVu Sans", "Liberation Sans", Arial, sans-serif;
       font-size: 10pt;
       line-height: 1.35;
-    }}
+    }
     
-    h1, h2, h3, h4 {{
+    h1, h2, h3, h4 {
       font-weight: 600;
       margin-top: 1em;
       margin-bottom: 0.4em;
       line-height: 1.2;
-    }}
+    }
     
-    h1 {{ font-size: 14pt; }}
-    h2 {{ font-size: 12.5pt; }}
-    h3 {{ font-size: 11.5pt; font-weight: 500; }}
-    h4 {{ font-size: 10.5pt; font-weight: 500; color: #333; }}
+    h1 { font-size: 14pt; }
+    h2 { font-size: 12.5pt; }
+    h3 { font-size: 11.5pt; font-weight: 500; }
+    h4 { font-size: 10.5pt; font-weight: 500; color: #333; }
     
-    .doc-header {{
+    .doc-header {
       position: running(doc-header);
       text-align: center;
-    }}
-    .doc-header img {{
+    }
+    .doc-header img {
       max-width: 100%;
       width: 6.5in;
       height: auto;
       display: block;
       margin: 0 auto;
-    }}
+    }
         
-    p, li {{ margin: 0.5em 0; }}
+    p, li { margin: 0.5em 0; }
     
-    table {{
+    table {
       border-collapse: collapse;
       width: 100%;
       margin: 0.7em 0;
       font-size: 9.5pt;
-    }}
-    th, td {{
+    }
+    th, td {
       border: 1px solid #ccc;
       padding: 6pt 8pt;
       vertical-align: top;
-    }}
-    th {{ background: #f4f4f6; font-weight: 600; }}
+    }
+    th { background: #f4f4f6; font-weight: 600; }
     
-    img {{
+    img {
       max-width: 100%;
       height: auto;
       page-break-inside: avoid;
       margin: 0.5em 0;
-    }}
+    }
     
-    .dashboard-page {{
+    .dashboard-page {
       page-break-before: always;
       text-align: center;
-    }}
+    }
     
-    .dashboard-page img {{
+    .dashboard-page img {
       max-width: 100%;
       width: 100%;
       height: auto;
-    }}
+    }
     
-    code, pre {{
+    code, pre {
       font-family: "Courier New", monospace;
       font-size: 9.5pt;
-    }}
-    pre {{
+    }
+    pre {
       background: #f7f7f9;
       border: 1px solid #eee;
       padding: 8pt 10pt;
       overflow-x: auto;
-    }}
+    }
     
-    hr {{
+    hr {
       border: 0;
       border-top: 1px solid #ddd;
       margin: 1em 0;
-    }}
+    }
     """
 
-    md_text = INPUT_MD.read_text(encoding="utf-8")
-    html_body = markdown.markdown(md_text, extensions=["extra", "toc", "tables", "sane_lists"])
-    header_html = f'''
-    <div class="doc-header">
-      <img src="{LETTERHEAD}" alt="Domino Letterhead">
-    </div>
-    '''
-
-    # Append dashboard image if it exists
-    dashboard_html = ""
-    if DASHBOARD.exists():
-        dashboard_html = f'''
-        <div class="dashboard-page">
-          <h2>Arize-Sourced Governance Dashboard</h2>
-          <img src="{DASHBOARD}" alt="AI Governance Dashboard">
+    # Process each markdown file
+    for input_md in md_files:
+        # Generate PDF filename
+        pdf_name = input_md.stem + ".pdf"
+        output_pdf = ARTIFACTS_DIR / pdf_name
+        
+        print(f"\nConverting: {input_md.name} -> {pdf_name}")
+        
+        md_text = input_md.read_text(encoding="utf-8")
+        html_body = markdown.markdown(md_text, extensions=["extra", "toc", "tables", "sane_lists"])
+        
+        header_html = f'''
+        <div class="doc-header">
+          <img src="{LETTERHEAD}" alt="Domino Letterhead">
         </div>
-        '''
-        print(f"Dashboard image found and will be appended: {DASHBOARD}")
-    else:
-        print(f"WARNING: Dashboard not found at {DASHBOARD}", file=sys.stderr)
+        ''' if LETTERHEAD.exists() else ""
 
-    html_doc = f"""<!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8">
-        <title>Governance Report</title>
-      </head>
-      <body>
-        {header_html}
-        {html_body}
-        {dashboard_html}
-      </body>
-    </html>"""
+        html_doc = f"""<!doctype html>
+        <html>
+          <head>
+            <meta charset="utf-8">
+            <title>Governance Report</title>
+          </head>
+          <body>
+            {header_html}
+            {html_body}
+          </body>
+        </html>"""
 
-    HTML(string=html_doc, base_url=str(Path.cwd())).write_pdf(
-        str(OUTPUT_PDF),
-        stylesheets=[CSS(string=CSS_STYLES)]
-    )
-    print(f"Done → {OUTPUT_PDF}")
+        HTML(string=html_doc, base_url=str(CODE_DIR)).write_pdf(
+            str(output_pdf),
+            stylesheets=[CSS(string=CSS_STYLES)]
+        )
+        print(f"  ✓ Created: {output_pdf}")
+    
+    print(f"\n✓ All PDFs saved to {ARTIFACTS_DIR}")
 
 
 if __name__ == "__main__":
-    main()
-    main2()
+    _, doc_paths = main()
+    main2(doc_paths)
