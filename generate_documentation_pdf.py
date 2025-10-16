@@ -424,6 +424,22 @@ def pull_arize_data(api_key: str, space_id: str, model_id: str, days_back: int) 
         print(f"Arize pull failed: {e}", file=sys.stderr)
         return None
 
+def list_artifacts_dir():
+    """Print contents of /mnt/artifacts directory"""
+    artifacts_path = Path("/mnt/artifacts")
+    print(f"\n{'='*80}")
+    print("CONTENTS OF /mnt/artifacts")
+    print(f"{'='*80}")
+    
+    if not artifacts_path.exists():
+        print("Directory does not exist yet")
+        return
+    
+    for item in sorted(artifacts_path.iterdir()):
+        size = item.stat().st_size if item.is_file() else "DIR"
+        print(f"  {item.name:50s} {size:>15}")
+    print()
+
 def clean(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["start_time"] = pd.to_datetime(df["start_time"])
@@ -683,26 +699,31 @@ def print_bundle_summary(bundles):
         if i < len(bundles):
             print(f"\n{'-'*80}\nNEXT BUNDLE\n{'-'*80}")
 
-    print(f"\nPDF GENERATION SUMMARY")
-    print(f"Ready to generate PDFs for {len(all_evidence_data)} bundles")
-    for bid, data in all_evidence_data.items():
-        print(f"  - {data['bundle'].get('name', 'Unnamed')}: {len(data['evidence'])} evidence sections")
-
     print(f"\nGENERATING MARKDOWN DOCUMENTATION")
+    png_path = None
+    
     for bid, data in all_evidence_data.items():
         bundle_name = data['bundle'].get('name', 'Unnamed')
         safe_filename = "".join(c for c in bundle_name if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
-        output_path = f"{safe_filename}_documentation.md"
+        
+        # FIX: Use bundle ID to ensure unique filenames
+        output_path = f"{safe_filename}_{bid}_documentation.md"
+        
         print(f"Creating documentation for: {bundle_name}")
         generated_file = generate_markdown_documentation(data, data['evidence'], output_path)
         print(f"Saved: {generated_file}")
 
-        # ---- NEW: append dashboard plots to each Markdown ----
-        out_dir = Path(os.getenv("OUTPUT_DIR", "/mnt/artifacts"))
-        png_path = generate_dashboard_png(out_dir)
+        # Generate dashboard once (or per bundle if you want separate dashboards)
+        if png_path is None:
+            out_dir = Path(os.getenv("OUTPUT_DIR", "/mnt/artifacts"))
+            png_path = generate_dashboard_png(out_dir)
+        
         if png_path:
             append_dashboard_section(generated_file, png_path)
-
+    
+    # List what we created
+    list_artifacts_dir()
+    
     return all_evidence_data, png_path
 
 
