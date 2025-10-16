@@ -413,31 +413,16 @@ def pull_arize_data(api_key: str, space_id: str, model_id: str, days_back: int) 
         df = client.export_model_to_df(
             space_id=space_id, model_id=model_id, environment=Environments.TRACING,
             start_time=start_time, end_time=end_time,
-            columns=[
-                "context.span_id","attributes.llm.model_name","attributes.llm.provider",
-                "attributes.llm.token_count.total","attributes.llm.token_count.prompt",
-                "attributes.llm.token_count.completion","status_code","start_time","end_time","name",
-            ],
+            # columns=[
+            #     "context.span_id","attributes.llm.model_name","attributes.llm.provider",
+            #     "attributes.llm.token_count.total","attributes.llm.token_count.prompt",
+            #     "attributes.llm.token_count.completion","status_code","start_time","end_time","name",
+            # ],
         )
         return df
     except Exception as e:
         print(f"Arize pull failed: {e}", file=sys.stderr)
         return None
-
-def sample_data(days_back: int, n: int = 380) -> pd.DataFrame:
-    rng = np.random.default_rng(7)
-    end_time = datetime.now(); start_time = end_time - timedelta(days=days_back)
-    dates = pd.date_range(start_time, end_time, periods=n)
-    df = pd.DataFrame({
-        "context.span_id": [f"span_{i:04d}" for i in range(n)],
-        "attributes.llm.model_name": rng.choice(["gpt-4", "gpt-3.5-turbo", "claude-3", "gpt-4o"], n),
-        "attributes.llm.provider": rng.choice(["openai", "anthropic"], n),
-        "attributes.llm.token_count.total": rng.integers(50, 3200, n),
-        "status_code": rng.choice(["OK", "ERROR"], n, p=[0.94, 0.06]),
-        "start_time": dates, "end_time": dates + pd.to_timedelta(rng.integers(1, 28, n), unit="s"),
-        "name": ["ChatCompletion"] * n,
-    })
-    return df
 
 def clean(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
