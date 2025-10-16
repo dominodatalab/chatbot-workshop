@@ -1,9 +1,10 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python33333
 """
-Domino Governance → Markdown generator + Visual Dashboard appender
+Domino Governance → Markdown + PDF Report Generator with Arize Dashboard
 - Pulls active bundles for current Domino project
-- Builds Markdown documentation from drafts/evidence
-- Appends "Visual Governance Dashboard" section with embedded image
+- Builds professional Markdown documentation from Q&A pairs
+- Generates PDF with letterhead and Arize visual dashboard
+- Includes timestamps and author information for audit trail
 
 Env (Domino):
   DOMINO_PROJECT_ID, DOMINO_USER_API_KEY (or DOMINO_API_KEY)
@@ -11,38 +12,32 @@ Optional (Arize):
   ARIZE_API_KEY, ARIZE_SPACE_ID, ARIZE_PROJECT_NAME, DAYS_BACK, OUTPUT_DIR
 """
 
-from __future__ import annotations
-
 import json
 import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.parse import urljoin
+from datetime import datetime, timedelta
 
 import requests
-
-# ---- Plots / Data deps ----
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from datetime import datetime, timedelta
 
-# Arize is optional; handle absence gracefully
+# Arize optional
 try:
     from arize.exporter import ArizeExportClient
     from arize.utils.types import Environments
 except Exception:
-    ArizeExportClient = None  # type: ignore
-    Environments = None       # type: ignore
+    ArizeExportClient = None
+    Environments = None
 
 
-# =========================
-# Domino API helpers
-# =========================
+# ===== DOMINO API HELPERS =====
 
-def get_auth_headers():
+def get_auth_headers() -> Dict[str, str]:
     api_key = os.getenv('DOMINO_USER_API_KEY') or os.getenv('DOMINO_API_KEY')
     headers = {'accept': 'application/json'}
     if api_key:
@@ -65,12 +60,10 @@ def fetch_bundles(base_url, headers):
 def filter_bundles_by_project(data, project_id):
     if not data or 'data' not in data:
         return data
-    # print(data)
     filtered_bundles = [
         bundle for bundle in data['data']
         if bundle.get('projectId') == project_id and bundle.get('state') == 'Active'
     ]
-    print(filtered_bundles)
     filtered_data = data.copy()
     filtered_data['data'] = filtered_bundles
     if 'meta' in filtered_data and 'pagination' in filtered_data['meta']:
@@ -78,355 +71,245 @@ def filter_bundles_by_project(data, project_id):
     return filtered_data
 
 
-def fetch_bundle_drafts(base_url, headers, bundle_id):
-    drafts_url = f'{base_url}api/governance/v1/drafts/latest?bundleId={bundle_id}'
+def fetch_bundle(base_url: str, headers: Dict[str, str], bundle_id: str) -> Optional[Dict]:
+    url = urljoin(base_url, f'/api/governance/v1/bundles/{bundle_id}')
     try:
-        response = requests.get(drafts_url, headers=headers, timeout=30)
-        print(response.json())
-        exit()
-        if response.status_code == 200:
-            return response.json()
-        else:
-            print(f"Failed to get drafts data: {response.status_code}")
-            return None
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.json()
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching drafts: {e}")
+        print(f"Error fetching bundle: {e}", file=sys.stderr)
         return None
 
 
-def parse_evidence_data(drafts_data):
-    evidence_groups: Dict[str, Dict] = {}
-    if not drafts_data:
-        return evidence_groups
-    for draft in drafts_data:
-        evidence_id = draft.get('evidenceId')
-        if evidence_id not in evidence_groups:
-            evidence_groups[evidence_id] = {
-                'evidence_id': evidence_id,
-                'artifacts': [],
-                'updated_at': draft.get('updatedAt')
-            }
-        artifact_content = draft.get('artifactContent')
-        artifact_info = {
-            'artifact_id': draft.get('artifactId'),
-            'content': artifact_content,
-            'type': type(artifact_content).__name__,
-            'updated_at': draft.get('updatedAt')
+def fetch_policy(base_url: str, headers: Dict[str, str], policy_id: str) -> Optional[Dict]:
+    url = urljoin(base_url, f'/api/governance/v1/policies/{policy_id}')
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching policy: {e}", file=sys.stderr)
+        return None
+
+
+def fetch_results(base_url: str, headers: Dict[str, str], bundle_id: str) -> Optional[List[Dict]]:
+    url = urljoin(base_url, f'/api/governance/v1/results/latest?bundleID={bundle_id}')
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching results: {e}", file=sys.stderr)
+        return None
+
+
+def build_evidence_map(policy: Dict) -> Dict[str, Dict]:
+    evidence_map = {}
+    if not policy or 'stages' not in policy:
+        return evidence_map
+    
+    for stage in policy['stages']:
+        if 'evidenceSet' in stage:
+            for evidence in stage['evidenceSet']:
+                evidence_map[evidence['id']] = {
+                    'name': evidence.get('name', ''),
+                    'description': evidence.get('description', ''),
+                    'externalId': evidence.get('externalId', ''),
+                    'artifacts': {
+                        artifact['id']: artifact.get('details', {})
+                        for artifact in evidence.get('artifacts', [])
+                    }
+                }
+    return evidence_map
+
+
+def build_qa_representation(bundle: Dict, policy: Dict, results: List[Dict]) -> List[Dict]:
+    evidence_map = build_evidence_map(policy)
+    qa_list = []
+    
+    latest_results = [r for r in results if r.get('isLatest', False)]
+    
+    for result in latest_results:
+        evidence_id = result.get('evidenceId')
+        artifact_id = result.get('artifactId')
+        answer = result.get('artifactContent')
+        
+        if not evidence_id or answer is None:
+            continue
+        
+        evidence = evidence_map.get(evidence_id, {})
+        artifact_details = evidence.get('artifacts', {}).get(artifact_id, {})
+        
+        question = artifact_details.get('label', evidence.get('name', 'Unknown Question'))
+        
+        qa_entry = {
+            'question': question,
+            'answer': answer,
+            'evidence_id': evidence_id,
+            'evidence_name': evidence.get('name', ''),
+            'evidence_description': evidence.get('description', ''),
+            'artifact_id': artifact_id,
+            'artifact_type': artifact_details.get('type', ''),
+            'created_at': result.get('createdAt', ''),
+            'created_by': result.get('createdBy', {})
         }
-        if isinstance(artifact_content, dict):
-            if 'files' in artifact_content:
-                artifact_info['content_type'] = 'file_upload'
-                artifact_info['files'] = artifact_content.get('files', [])
-            else:
-                artifact_info['content_type'] = 'structured_data'
-        elif isinstance(artifact_content, list):
-            artifact_info['content_type'] = 'multiple_choice'
-            artifact_info['selections'] = artifact_content
-        else:
-            artifact_info['content_type'] = 'text'
-            artifact_info['text'] = str(artifact_content)
-        evidence_groups[evidence_id]['artifacts'].append(artifact_info)
-    return evidence_groups
+        
+        qa_list.append(qa_entry)
+    
+    return qa_list
 
 
-# =========================
-# Markdown generator
-# =========================
+def get_bundle_qa(base_url: str, bundle_id: str) -> Optional[Dict]:
+    headers = get_auth_headers()
+    
+    bundle = fetch_bundle(base_url, headers, bundle_id)
+    if not bundle:
+        return None
+    
+    policy_id = bundle.get('policyId')
+    if not policy_id:
+        print("No policy ID found in bundle", file=sys.stderr)
+        return None
+    
+    policy = fetch_policy(base_url, headers, policy_id)
+    results = fetch_results(base_url, headers, bundle_id)
+    
+    if not policy or not results:
+        return None
+    
+    qa_pairs = build_qa_representation(bundle, policy, results)
+    
+    return {
+        'bundle_id': bundle_id,
+        'bundle_name': bundle.get('name', ''),
+        'policy_id': policy_id,
+        'policy_name': bundle.get('policyName', ''),
+        'project_id': bundle.get('projectId', ''),
+        'project_name': bundle.get('projectName', ''),
+        'stage': bundle.get('stage', ''),
+        'state': bundle.get('state', ''),
+        'created_at': bundle.get('createdAt', ''),
+        'created_by': bundle.get('createdBy', {}),
+        'qa_pairs': qa_pairs
+    }
 
-def generate_markdown_documentation(bundle_data, evidence_data, output_path="governance_documentation.md"):
-    """Generate markdown documentation from bundle and evidence data."""
-    bundle = bundle_data['bundle']
-    evidence = bundle_data['evidence']
 
+# ===== MARKDOWN GENERATOR =====
+
+def format_answer(answer):
+    """Format different types of answers for display"""
+    if isinstance(answer, dict):
+        if 'label' in answer and 'value' in answer:
+            return answer['label']
+        return json.dumps(answer, indent=2)
+    elif isinstance(answer, list):
+        if all(isinstance(item, str) for item in answer):
+            return ', '.join(answer)
+        return '\n'.join(f"- {json.dumps(item) if isinstance(item, dict) else item}" for item in answer)
+    return str(answer)
+
+
+def format_datetime(dt_str):
+    """Format ISO datetime string to readable format"""
+    if not dt_str:
+        return "N/A"
+    try:
+        dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+        return dt.strftime("%B %d, %Y at %I:%M %p UTC")
+    except:
+        return dt_str
+
+
+def format_person(person_dict):
+    """Format person name from dictionary"""
+    if not person_dict:
+        return "Unknown"
+    first = person_dict.get('firstName', '')
+    last = person_dict.get('lastName', '')
+    return f"{first} {last}".strip() or "Unknown"
+
+
+def generate_markdown_documentation(bundle_data: Dict, output_path: str = "governance_documentation.md") -> str:
+    """Generate professional markdown documentation from bundle Q&A data"""
+    
     md = []
-    md.append(f"# {bundle.get('name', 'AI System')} - Documentation\n")
-
+    
+    # Header
+    md.append(f"# AI Governance Report: {bundle_data['bundle_name']}")
+    md.append("")
+    md.append(f"**System ID:** {bundle_data.get('bundle_id', 'N/A')}")
+    md.append(f"**Project:** {bundle_data.get('project_name', 'N/A')}")
+    md.append(f"**Policy:** {bundle_data.get('policy_name', 'N/A')}")
+    md.append(f"**Current Stage:** {bundle_data.get('stage', 'N/A')}")
+    md.append(f"**Status:** {bundle_data.get('state', 'N/A')}")
+    md.append(f"**Report Generated:** {datetime.now().strftime('%B %d, %Y at %I:%M %p')}")
+    md.append("")
+    md.append("---")
+    md.append("")
+    
     # Executive Summary
-    exec_summary = ""
-    for evi_id, evi_data in evidence.items():
-        for artifact in evi_data['artifacts']:
-            if artifact.get('content_type') == 'text':
-                text = artifact.get('text', '').strip()
-                if len(text) > 100:
-                    exec_summary = text
-                    break
-        if exec_summary:
-            break
-    
     md.append("## Executive Summary")
-    md.append(exec_summary or "Summary not provided.")
     md.append("")
-
-    # Business Requirements
-    md.append("## Business Requirements")
-    business_req = ""
-    for evi_id, evi_data in evidence.items():
-        for artifact in evi_data['artifacts']:
-            if artifact.get('content_type') == 'text':
-                text = artifact.get('text', '').strip()
-                if any(w in text.lower() for w in ['requirements', 'must', 'should']):
-                    business_req = text
-                    break
-        if business_req:
-            break
-    
-    md.append(business_req or "—")
+    md.append(f"This governance report documents the **{bundle_data['bundle_name']}** AI system, ")
+    md.append(f"currently in the **{bundle_data.get('stage', 'Unknown')}** stage. ")
+    md.append(f"This report was created on {format_datetime(bundle_data.get('created_at'))} ")
+    md.append(f"by {format_person(bundle_data.get('created_by'))}.")
     md.append("")
-
-    # Business Background and Rationale
-    md.append("## Business Background and Rationale")
-    use_case = ""
-    users = ""
-    system_type = ""
-    
-    for evi_id, evi_data in evidence.items():
-        for artifact in evi_data['artifacts']:
-            if artifact.get('content_type') == 'text':
-                text = artifact.get('text', '').strip()
-                text_lower = text.lower()
-                
-                if not use_case and any(w in text_lower for w in ['support', 'analysis', 'use']):
-                    use_case = text
-                elif not users and any(w in text_lower for w in ['team', 'user']):
-                    users = text
-                elif not system_type and any(w in text_lower for w in ['enhancement', 'existing', 'new']):
-                    system_type = text
-    
-    md.append(f"**Use Case**: {use_case or '—'}\n")
-    md.append(f"**Users**: {users or '—'}\n")
-    md.append(f"**New/Existing System**: {system_type or '—'}\n")
-
-    # Policies - handle both string and dict selections
-    md.append("## Applicable Policies, Standards, and Procedures")
-    policies = []
-    
-    for evi_id, evi_data in evidence.items():
-        for artifact in evi_data['artifacts']:
-            if artifact.get('content_type') == 'multiple_choice':
-                selections = artifact.get('selections', [])
-                for item in selections:
-                    if isinstance(item, str):
-                        if any(w in item.lower() for w in ['policy', 'governance', 'standard', 'law', 'compliance']):
-                            policies.append(item)
-                    elif isinstance(item, dict):
-                        # Handle dict selections - extract meaningful values
-                        for key, value in item.items():
-                            if isinstance(value, str) and value:
-                                policies.append(f"{key}: {value}")
-    
-    for p in sorted(set(policies)):
-        md.append(f"- {p}")
-    if not policies:
-        md.append("- —")
+    md.append("---")
     md.append("")
-
-    # Functional Requirements
-    md.append("## Functional Requirements")
-    func_requirements = set()
-    data_formats = set()
     
-    for evi_id, evi_data in evidence.items():
-        for artifact in evi_data['artifacts']:
-            ct = artifact.get('content_type')
-            
-            if ct == 'multiple_choice':
-                selections = artifact.get('selections', [])
-                for item in selections:
-                    item_text = ""
-                    if isinstance(item, str):
-                        item_text = item
-                    elif isinstance(item, dict):
-                        item_text = ' '.join(str(v) for v in item.values() if v)
-                    
-                    item_lower = item_text.lower()
-                    if any(w in item_lower for w in ['api', 'csv', 'json', 'endpoint', 'integration']):
-                        func_requirements.add(item_text)
-                    if any(w in item_lower for w in ['csv', 'json', 'export', 'data']):
-                        data_formats.add(item_text)
-            
-            elif ct == 'text':
-                text = artifact.get('text', '').strip()
-                if any(w in text.lower() for w in ['json', 'csv', 'api', 'endpoint']):
-                    func_requirements.add(text)
+    # Group Q&A pairs by evidence for better organization
+    qa_by_evidence = {}
+    for qa in bundle_data.get('qa_pairs', []):
+        evidence_name = qa.get('evidence_name') or qa.get('question', 'General')
+        if evidence_name not in qa_by_evidence:
+            qa_by_evidence[evidence_name] = []
+        qa_by_evidence[evidence_name].append(qa)
     
-    for r in sorted(func_requirements):
-        md.append(f"- {r}")
-    if data_formats:
-        md.append(f"- Outputs data in {', '.join(sorted(data_formats))}")
-    if not func_requirements and not data_formats:
-        md.append("- —")
+    # Generate sections from Q&A pairs
+    md.append("## System Information and Compliance Evidence")
     md.append("")
-
-    # Development Dataset
-    md.append("## Development Dataset")
-    data_sources = set()
-    data_sampling = ""
-    data_quality = ""
-    vendor_info = ""
     
-    for evi_id, evi_data in evidence.items():
-        for artifact in evi_data['artifacts']:
-            ct = artifact.get('content_type')
-            
-            if ct == 'multiple_choice':
-                selections = artifact.get('selections', [])
-                for item in selections:
-                    item_text = ""
-                    if isinstance(item, str):
-                        item_text = item
-                    elif isinstance(item, dict):
-                        item_text = ' '.join(str(v) for v in item.values() if v)
-                    
-                    if any(w in item_text.lower() for w in ['repository', 'data', 'portfolio', 'internal']):
-                        data_sources.add(item_text)
-            
-            elif ct == 'text':
-                text = artifact.get('text', '').strip()
-                text_lower = text.lower()
-                
-                if not data_sampling and any(w in text_lower for w in ['sampled', 'training']):
-                    data_sampling = text
-                elif not data_quality and any(w in text_lower for w in ['eda', 'quality', 'normalization']):
-                    data_quality = text
-                elif not vendor_info and 'vendor' in text_lower:
-                    vendor_info = text
-    
-    md.append("**Overview**: Pre-approved data from internal sources.\n")
-    md.append(f"**Data Sources**: {', '.join(sorted(data_sources)) or '—'}\n")
-    md.append(f"**Vendor Data**: {vendor_info or 'No vendor data used; all data sourced internally.'}\n")
-    md.append(f"**Data Sampling**: {data_sampling or '—'}\n")
-    md.append(f"**Data Quality**: {data_quality or '—'}\n")
-
-    # Methodology
-    md.append("## Methodology, Theory and Approach")
-    methodology = ""
-    limitations = ""
-    
-    for evi_id, evi_data in evidence.items():
-        for artifact in evi_data['artifacts']:
-            if artifact.get('content_type') == 'text':
-                text = artifact.get('text', '').strip()
-                text_lower = text.lower()
-                
-                if not methodology and any(w in text_lower for w in ['utilizes', 'parsing', 'nlp', 'approach']):
-                    methodology = text
-                elif not limitations and any(w in text_lower for w in ['error', 'risk', 'limitation']):
-                    limitations = text
-    
-    md.append(f"**Description**: {methodology or '—'}\n")
-    md.append(f"**Limitations and Risks**: {limitations or '—'}\n")
-
-    # System Calibration
-    md.append("## System Calibration")
-    assumptions = ""
-    github_repo = ""
-    
-    for evi_id, evi_data in evidence.items():
-        for artifact in evi_data['artifacts']:
-            if artifact.get('content_type') == 'text':
-                text = artifact.get('text', '').strip()
-                text_lower = text.lower()
-                
-                if not assumptions and 'assumption' in text_lower:
-                    assumptions = text
-                if not github_repo and 'github' in text_lower:
-                    github_repo = text
-    
-    md.append(f"**Development Code**: {github_repo or 'Located at internal repository'}\n")
-    md.append(f"**Key System Assumptions**: {assumptions or '—'}\n")
-
-    # Developer Testing
-    md.append("## Developer Testing")
-    test_results = []
-    
-    for evi_id, evi_data in evidence.items():
-        for artifact in evi_data['artifacts']:
-            if artifact.get('content_type') == 'text':
-                text = artifact.get('text', '').strip()
-                text_lower = text.lower()
-                if any(w in text_lower for w in ['accuracy', 'test', 'performance', 'achieved']):
-                    test_results.append(text)
-    
-    if test_results:
-        for result in test_results:
-            md.append(f"- {result}")
-    else:
-        md.append("—")
-    md.append("")
-
-    # Governance
-    md.append("## Governance")
-    md.append("**Ethical Considerations**:")
-    md.extend([
-        "- **Fairness**: No risk of discrimination",
-        "- **Safety**: Complies with internal and external regulations",
-        "- **Security**: Restricted to internal access",
-        "- **Robustness**: Output accuracy monitored regularly",
-        "- **Explainability**: Processing steps logged and reviewable",
-        "- **Transparency**: System functionality documented",
-        "- **Governance**: Roles assigned per organizational guidance",
-        ""
-    ])
-
-    # Risk Monitoring Plan
-    md.append("## Risk Monitoring Plan")
-    md.append("**Risks**: Processing errors, Data quality issues, Unauthorized access\n")
-    md.append("**Metrics**: Processing accuracy, Input validation, Access logs\n")
-    md.append("**Review**: Monthly dashboard review\n")
-
-    # Lessons Learned
-    md.append("## Lessons Learned and Future Enhancements")
-    enhancements = []
-    
-    for evi_id, evi_data in evidence.items():
-        for artifact in evi_data['artifacts']:
-            if artifact.get('content_type') == 'text':
-                text = artifact.get('text', '').strip()
-                if any(w in text.lower() for w in ['improved', 'plan', 'expand', 'enhance', 'future']):
-                    enhancements.append(text)
-    
-    if enhancements:
-        for e in enhancements:
-            md.append(f"- {e}")
-    else:
-        md.append("- —")
-    md.append("")
-
-    # Deployment
-    md.append("## Deployment Specification")
-    technical_req = ""
-    access_info = ""
-    
-    for evi_id, evi_data in evidence.items():
-        for artifact in evi_data['artifacts']:
-            if artifact.get('content_type') == 'text':
-                text = artifact.get('text', '').strip()
-                text_lower = text.lower()
-                
-                if not technical_req and any(w in text_lower for w in ['hosted', 'server', 'endpoint']):
-                    technical_req = text
-                elif not access_info and 'access' in text_lower:
-                    access_info = text
-    
-    md.append(f"**Technical Requirements**: {technical_req or 'Hosted on internal infrastructure'}\n")
-    md.append(f"**Engineering Interface**: {access_info or 'API endpoints available'}\n")
-    md.append("**Implementation Code**: Repository at internal location\n")
-    md.append("**Production Access**: Access via internal roles\n")
-
-    # Attachments
-    files_found = []
-    for evi_id, evi_data in evidence.items():
-        for artifact in evi_data['artifacts']:
-            if artifact.get('content_type') == 'file_upload':
-                files = artifact.get('files', [])
-                files_found.extend(files)
-    
-    if files_found:
-        md.append("## Attachments")
-        for f in files_found:
-            md.append(f"- {f.get('name')} ({f.get('sizeLabel')}) - {f.get('path')}")
+    for evidence_name, qa_list in qa_by_evidence.items():
+        md.append(f"### {evidence_name}")
         md.append("")
-
+        
+        for qa in qa_list:
+            question = qa.get('question', 'Unknown Question')
+            answer = format_answer(qa.get('answer'))
+            created_at = format_datetime(qa.get('created_at'))
+            created_by = format_person(qa.get('created_by'))
+            
+            md.append(f"**{question}**")
+            md.append("")
+            md.append(f"{answer}")
+            md.append("")
+            md.append(f"*Last updated: {created_at} by {created_by}*")
+            md.append("")
+            md.append("---")
+            md.append("")
+    
+    # Audit Trail Section
+    md.append("## Audit Trail")
+    md.append("")
+    md.append("| Question | Answer | Updated By | Updated At |")
+    md.append("|----------|--------|------------|------------|")
+    
+    for qa in bundle_data.get('qa_pairs', []):
+        question = qa.get('question', 'N/A').replace('|', '\\|')
+        answer_preview = str(qa.get('answer', 'N/A'))[:50].replace('|', '\\|')
+        if len(str(qa.get('answer', ''))) > 50:
+            answer_preview += "..."
+        created_by = format_person(qa.get('created_by')).replace('|', '\\|')
+        created_at = format_datetime(qa.get('created_at')).replace('|', '\\|')
+        
+        md.append(f"| {question} | {answer_preview} | {created_by} | {created_at} |")
+    
+    md.append("")
+    md.append("---")
+    md.append("")
+    
     # Write file
     final_content = '\n'.join(md)
     with open(output_path, 'w', encoding='utf-8') as f:
@@ -435,11 +318,10 @@ def generate_markdown_documentation(bundle_data, evidence_data, output_path="gov
     print(f"Documentation saved to: {output_path}")
     return output_path
 
-# =========================
-# Dashboard (plots) bits
-# =========================
 
-FS_COLORS: Dict[str, str] = {
+# ===== ARIZE DASHBOARD VISUALIZATION =====
+
+FS_COLORS = {
     "primary_blue": "#1B365D", "secondary_blue": "#2E5984", "accent_blue": "#4A90B8",
     "success_green": "#2E7D32", "warning_orange": "#F57C00", "danger_red": "#C62828",
     "neutral_gray": "#5F6368", "white": "#FFFFFF", "text_dark": "#212529",
@@ -448,6 +330,7 @@ FS_PALETTE = [
     FS_COLORS["primary_blue"], FS_COLORS["secondary_blue"], FS_COLORS["accent_blue"],
     FS_COLORS["success_green"], FS_COLORS["warning_orange"], FS_COLORS["danger_red"],
 ]
+
 plt.rcParams.update({
     "font.family": "sans-serif",
     "font.sans-serif": ["Helvetica", "Arial", "DejaVu Sans", "Liberation Sans", "sans-serif"],
@@ -462,6 +345,7 @@ plt.rcParams.update({
     "axes.linewidth": 1.0,
 })
 sns.set_palette(FS_PALETTE)
+
 
 def pull_arize_data(api_key: str, space_id: str, model_id: str, days_back: int) -> Optional[pd.DataFrame]:
     if ArizeExportClient is None:
@@ -483,20 +367,6 @@ def pull_arize_data(api_key: str, space_id: str, model_id: str, days_back: int) 
         print(f"Arize pull failed: {e}", file=sys.stderr)
         return None
 
-def sample_data(days_back: int, n: int = 380) -> pd.DataFrame:
-    rng = np.random.default_rng(7)
-    end_time = datetime.now(); start_time = end_time - timedelta(days=days_back)
-    dates = pd.date_range(start_time, end_time, periods=n)
-    df = pd.DataFrame({
-        "context.span_id": [f"span_{i:04d}" for i in range(n)],
-        "attributes.llm.model_name": rng.choice(["gpt-4", "gpt-3.5-turbo", "claude-3", "gpt-4o"], n),
-        "attributes.llm.provider": rng.choice(["openai", "anthropic"], n),
-        "attributes.llm.token_count.total": rng.integers(50, 3200, n),
-        "status_code": rng.choice(["OK", "ERROR"], n, p=[0.94, 0.06]),
-        "start_time": dates, "end_time": dates + pd.to_timedelta(rng.integers(1, 28, n), unit="s"),
-        "name": ["ChatCompletion"] * n,
-    })
-    return df
 
 def clean(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -506,7 +376,8 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
     df["duration_s"] = (df["end_time"] - df["start_time"]).dt.total_seconds()
     df["attributes.llm.token_count.total"] = df["attributes.llm.token_count.total"].fillna(0)
     df["status_code"] = df["status_code"].fillna("UNKNOWN")
-    return df
+    return dfF
+
 
 def kpis(df: pd.DataFrame) -> Dict[str, float]:
     return {
@@ -520,6 +391,7 @@ def kpis(df: pd.DataFrame) -> Dict[str, float]:
                              + (df["status_code"].eq("OK")).mean() * 50),
     }
 
+
 def proxy_response_quality(df: pd.DataFrame) -> Dict[str, float]:
     dur = 1 - (df["duration_s"].clip(0, 30) / 30)
     ok = df["status_code"].eq("OK").astype(float)
@@ -530,14 +402,19 @@ def proxy_response_quality(df: pd.DataFrame) -> Dict[str, float]:
         "Helpfulness": float((0.5 * dur + 0.5 * tok).mean() * 100),
     }
 
+
 def proxy_bias_groups(df: pd.DataFrame) -> Dict[str, float]:
-    q = proxy_response_quality(df); base = (q["Coherence"] + q["Relevance"] + q["Helpfulness"]) / 3
+    q = proxy_response_quality(df)
+    base = (q["Coherence"] + q["Relevance"] + q["Helpfulness"]) / 3
     means = df.groupby("attributes.llm.provider")["attributes.llm.token_count.total"].mean()
-    if len(means) < 2: return {"Group A": base, "Group B": base}
+    if len(means) < 2:
+        return {"Group A": base, "Group B": base}
     mn, mx = means.min(), means.max()
-    if mx == mn: return {"Group A": base, "Group B": base}
+    if mx == mn:
+        return {"Group A": base, "Group B": base}
     gap = (mx - mn) / mx
     return {"Group A": base, "Group B": max(0.0, base * (1 - 0.2 * gap))}
+
 
 def kpi_band(ax: plt.Axes, df: pd.DataFrame) -> None:
     m = kpis(df)
@@ -550,28 +427,37 @@ def kpi_band(ax: plt.Axes, df: pd.DataFrame) -> None:
         ("PEAK HOUR", f"{int(m['peak_hour'])}:00"),
         ("AVG QUALITY", f"{m['avg_quality']:.1f}%"),
     ]
-    ax.axis("off"); x0, dx = 0.015, 0.14
+    ax.axis("off")
+    x0, dx = 0.015, 0.14
     for i, (label, value) in enumerate(items):
         ax.text(x0 + i * dx, 0.68, label, transform=ax.transAxes, fontsize=9.5, color=FS_COLORS["neutral_gray"])
         ax.text(x0 + i * dx, 0.30, value, transform=ax.transAxes, fontsize=16, fontweight="bold", color=FS_COLORS["primary_blue"])
+
 
 def pie_model_usage(ax: plt.Axes, df: pd.DataFrame) -> None:
     counts = df["attributes.llm.model_name"].value_counts()
     ax.clear()
     if counts.empty:
-        ax.axis("off"); ax.text(0.5, 0.5, "No data", ha="center", va="center"); return
-    colors = FS_PALETTE[: len(counts)]
+        ax.axis("off")
+        ax.text(0.5, 0.5, "No data", ha="center", va="center")
+        return
+    colors = FS_PALETTE[:len(counts)]
     wedges, texts, autotexts = ax.pie(counts.values, labels=counts.index, autopct="%1.1f%%",
                                       colors=colors, startangle=90, textprops={"fontsize": 9})
-    for t in autotexts: t.set_color("white"); t.set_fontweight("bold")
+    for t in autotexts:
+        t.set_color("white")
+        t.set_fontweight("bold")
     ax.set_title("Model Usage Distribution", loc="left", color=FS_COLORS["primary_blue"])
+
 
 def line_tokens_by_hour(ax: plt.Axes, df: pd.DataFrame) -> None:
     hourly = df.groupby("hour")["attributes.llm.token_count.total"].sum()
     ax.plot(hourly.index, hourly.values, marker="o", linewidth=2)
     ax.fill_between(hourly.index, hourly.values, alpha=0.12)
     ax.set_title("Token Usage by Hour", loc="left", color=FS_COLORS["primary_blue"])
-    ax.set_xlabel("Hour"); ax.set_ylabel("Total Tokens")
+    ax.set_xlabel("Hour")
+    ax.set_ylabel("Total Tokens")
+
 
 def bar_system_health(ax: plt.Axes, df: pd.DataFrame) -> None:
     counts = df["status_code"].value_counts()
@@ -583,6 +469,7 @@ def bar_system_health(ax: plt.Axes, df: pd.DataFrame) -> None:
     ax.set_title("System Health Status", loc="left", color=FS_COLORS["primary_blue"])
     ax.set_ylabel("Requests")
 
+
 def hist_tokens(ax: plt.Axes, df: pd.DataFrame) -> None:
     vals = df.loc[df["attributes.llm.token_count.total"] > 0, "attributes.llm.token_count.total"]
     ax.hist(vals, bins=20, alpha=0.8, edgecolor="white")
@@ -590,11 +477,14 @@ def hist_tokens(ax: plt.Axes, df: pd.DataFrame) -> None:
     ax.axvline(mean_v, linestyle="--", linewidth=2, label=f"Mean: {mean_v:.0f}")
     ax.legend(loc="upper right")
     ax.set_title("Token Usage Distribution", loc="left", color=FS_COLORS["primary_blue"])
-    ax.set_xlabel("Tokens/Request"); ax.set_ylabel("Frequency")
+    ax.set_xlabel("Tokens/Request")
+    ax.set_ylabel("Frequency")
+
 
 def bars_response_quality(ax: plt.Axes, df: pd.DataFrame) -> None:
     scores = proxy_response_quality(df)
-    labels = list(scores.keys()); values = [scores[k] for k in labels]
+    labels = list(scores.keys())
+    values = [scores[k] for k in labels]
     bars = ax.bar(labels, values)
     for b, v in zip(bars, values):
         ax.text(b.get_x() + b.get_width()/2, v + 1, f"{v:.1f}%", ha="center", va="bottom", fontweight="bold", fontsize=9)
@@ -602,15 +492,18 @@ def bars_response_quality(ax: plt.Axes, df: pd.DataFrame) -> None:
     ax.set_title("Response Quality (proxy)", loc="left", color=FS_COLORS["primary_blue"])
     ax.set_ylabel("Average score (%)")
 
+
 def bars_bias_detection(ax: plt.Axes, df: pd.DataFrame) -> None:
     grp = proxy_bias_groups(df)
-    labels = list(grp.keys()); values = [grp[k] for k in labels]
+    labels = list(grp.keys())
+    values = [grp[k] for k in labels]
     bars = ax.bar(labels, values)
     for b, v in zip(bars, values):
         ax.text(b.get_x() + b.get_width()/2, v + 1, f"{v:.1f}%", ha="center", va="bottom", fontweight="bold", fontsize=9)
     ax.set_ylim(0, 100)
     ax.set_title("Bias Detection (proxy parity)", loc="left", color=FS_COLORS["primary_blue"])
     ax.set_ylabel("Score (%)")
+
 
 def build_dashboard(df: pd.DataFrame) -> plt.Figure:
     mosaic = [
@@ -625,10 +518,11 @@ def build_dashboard(df: pd.DataFrame) -> plt.Figure:
         gridspec_kw={"height_ratios": height_ratios, "wspace": 0.24, "hspace": 0.34},
     )
     fig.patch.set_facecolor(FS_COLORS["white"])
+    
     axs["T"].axis("off")
-    axs["T"].text(0.01, 0.60, "AI GOVERNANCE & RISK MANAGEMENT DASHBOARD (data is sourced from Arize)",
+    axs["T"].text(0.01, 0.60, "AI GOVERNANCE & RISK MANAGEMENT DASHBOARD",
                   fontsize=22, fontweight="bold", color=FS_COLORS["primary_blue"], transform=axs["T"].transAxes)
-    axs["T"].text(0.01, 0.22, "Real-time Monitoring & Compliance Assessment",
+    axs["T"].text(0.01, 0.22, "Real-time Monitoring & Compliance Assessment (Arize Data)",
                   fontsize=12, color=FS_COLORS["neutral_gray"], style="italic", transform=axs["T"].transAxes)
 
     kpi_band(axs["B"], df)
@@ -642,147 +536,30 @@ def build_dashboard(df: pd.DataFrame) -> plt.Figure:
     fig.subplots_adjust(left=0.04, right=0.985, top=0.97, bottom=0.05, wspace=0.24, hspace=0.34)
     return fig
 
+
 def generate_dashboard_png(output_dir: Path) -> Optional[Path]:
     api = os.getenv("ARIZE_API_KEY", "")
     space = os.getenv("ARIZE_SPACE_ID", "")
-    model = os.getenv("ARIZE_PROJECT_NAME", "Agent-POC")
+    model = os.getenv("ARIZE_PROJECT_NAME", "FSI-Demo-Project")
     days_back = int(os.getenv("DAYS_BACK", "7"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pull real data if possible
-    df: Optional[pd.DataFrame] = None
+    df = None
     if api and space and model:
         df = pull_arize_data(api, space, model, days_back)
-        print(df)
-    
+        if df is not None:
+            print(f"Pulled {len(df)} records from Arize")
+            
     df = clean(df)
     fig = build_dashboard(df)
-    out = output_dir / "ai_governance_dashboard_lite.png"
+    out = output_dir / "ai_governance_dashboard.png"
     fig.savefig(out, dpi=300, bbox_inches="tight", facecolor="white", edgecolor="none", pad_inches=0.3)
     plt.close(fig)
     print(f"Saved dashboard: {out}")
     return out
 
 
-# =========================
-# Orchestration
-# =========================
-
-def print_organized_evidence(evidence_groups):
-    print(f"\nORGANIZED EVIDENCE DATA FOR PDF GENERATION")
-    print(f"Found {len(evidence_groups)} evidence sections")
-    for i, (evidence_id, evidence) in enumerate(evidence_groups.items(), 1):
-        print(f"\n{'='*80}")
-        print(f"EVIDENCE SECTION {i}")
-        print(f"Evidence ID: {evidence_id}")
-        print(f"Last Updated: {evidence['updated_at']}")
-        print(f"Number of Artifacts: {len(evidence['artifacts'])}")
-        print(f"{'='*80}")
-        for j, artifact in enumerate(evidence['artifacts'], 1):
-            print(f"\n  Artifact {j}")
-            print(f"      Artifact ID: {artifact.get('artifact_id')}")
-            print(f"      Content Type: {artifact.get('content_type')}")
-            print(f"      Updated: {artifact.get('updated_at')}")
-            if artifact.get('content_type') == 'text':
-                content = artifact.get('text', '')
-                print(f"      Content: {content[:200]}..." if len(content) > 200 else f"      Content: {content}")
-            elif artifact.get('content_type') == 'multiple_choice':
-                print(f"      Selections: {artifact.get('selections')}")
-            elif artifact.get('content_type') == 'file_upload':
-                files = artifact.get('files', [])
-                print(f"      Files ({len(files)}):")
-                for f in files:
-                    print(f"        - {f.get('name')} ({f.get('sizeLabel')})")
-                    print(f"          Path: {f.get('path')}")
-            elif artifact.get('content_type') == 'structured_data':
-                print(f"      Structured Data: {artifact.get('content')}")
-
-
-def print_bundle_summary(bundles):
-    if not bundles:
-        print("No active bundles found for this project.")
-        return {}
-
-    base_url = 'https://fitch.domino-eval.com/'
-    headers = get_auth_headers()
-
-    print(f"\n=== COMPREHENSIVE GOVERNANCE BUNDLE ANALYSIS ===")
-    print(f"Total active bundles: {len(bundles)}")
-
-    all_evidence_data = {}
-
-    for i, bundle in enumerate(bundles, 1):
-        bundle_id = bundle.get('id')
-        print(f"\n{'='*80}")
-        print(f"COMPREHENSIVE BUNDLE REPORT: {bundle.get('name', 'Unnamed')}")
-        print(f"{'='*80}")
-
-        print(f"\nBASIC INFORMATION")
-        print(f"Bundle ID: {bundle_id}")
-        print(f"State: {bundle.get('state', 'Unknown')}")
-        print(f"Current Stage: {bundle.get('stage', 'Unknown')}")
-        print(f"Policy: {bundle.get('policyName', 'Unknown')}")
-        print(f"Classification: {bundle.get('classificationValue', 'None')}")
-        print(f"Project: {bundle.get('projectName', 'N/A')} (Owner: {bundle.get('projectOwner', 'N/A')})")
-
-        created_by = bundle.get('createdBy', {})
-        creator_name = f"{created_by.get('firstName', '')} {created_by.get('lastName', '')}".strip()
-        print(f"Created: {bundle.get('createdAt', 'Unknown')} by {creator_name}")
-
-        print(f"\nFETCHING EVIDENCE DATA FROM DRAFTS")
-        drafts_data = fetch_bundle_drafts(base_url, headers, bundle_id)
-        print('drafts_data', drafts_data)
-        exit()
-        
-        if drafts_data:
-            print(f"Successfully retrieved {len(drafts_data)} evidence items")
-            evidence_groups = parse_evidence_data(drafts_data)
-            # print_organized_evidence(evidence_groups)
-            print(evidence_groups)
-            all_evidence_data[bundle_id] = {'bundle': bundle, 'evidence': evidence_groups}
-        else:
-            print("No evidence data found")
-
-        stages = bundle.get('stages', [])
-        if stages:
-            print(f"\nGOVERNANCE STAGES ({len(stages)})")
-            for stage_num, stage in enumerate(stages, 1):
-                info = stage.get('stage', {})
-                name = info.get('name', 'Unknown')
-                print(f"  {stage_num}. {name}")
-                print(f"     Stage ID: {info.get('id', 'N/A')}")
-                if name == bundle.get('stage'):
-                    print(f"     CURRENT STAGE")
-
-        if i < len(bundles):
-            print(f"\n{'-'*80}\nNEXT BUNDLE\n{'-'*80}")
-
-    print(f"\nPDF GENERATION SUMMARY")
-    print(f"Ready to generate PDFs for {len(all_evidence_data)} bundles")
-
-    print(f"\nGENERATING MARKDOWN DOCUMENTATION")
-    for bid, data in all_evidence_data.items():
-        bundle_name = data['bundle'].get('name', 'Unnamed')
-        safe_filename = "".join(c for c in bundle_name if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
-        output_path = f"{safe_filename}_documentation.md"
-        print(f"Creating documentation for: {bundle_name}")
-        generated_file_path = generate_markdown_documentation(data, data['evidence'], output_path)
-        print(f"Saved: {generated_file_path}")
-
-        # ---- NEW: append dashboard plots to each Markdown ----
-        # out_dir = Path(os.getenv("OUTPUT_DIR", "/mnt/artifacts"))
-        # png_path = generate_dashboard_png(out_dir)
-        # if png_path:
-        #     append_dashboard_section(generated_file, png_path)
-
-    return all_evidence_data, generated_file_path
-
-
 def append_dashboard_section(markdown_file: str, png_path: Path) -> None:
-    """
-    Appends a 'Visual Governance Dashboard' section to the given Markdown file,
-    embedding the generated PNG. Uses a relative path if possible.
-    """
     try:
         rel = os.path.relpath(png_path, start=Path(markdown_file).parent)
     except Exception:
@@ -792,9 +569,9 @@ def append_dashboard_section(markdown_file: str, png_path: Path) -> None:
         "",
         "## Arize Visual Governance Dashboard",
         "",
-        "_Auto-generated from Arize trace data._",
+        "_Auto-generated monitoring dashboard from Arize trace data._",
         "",
-        f"![AI Governance Dashboard]({rel}){{ width=90% }}",
+        f"![AI Governance Dashboard]({rel})",
         "",
     ]
     with open(markdown_file, "a", encoding="utf-8") as f:
@@ -802,56 +579,35 @@ def append_dashboard_section(markdown_file: str, png_path: Path) -> None:
     print(f"Appended dashboard section to: {markdown_file}")
 
 
-def main():
-    base_url = 'https://fitch.domino-eval.com/'
-    project_id = os.getenv('DOMINO_PROJECT_ID')
-    if not project_id:
-        print("Error: DOMINO_PROJECT_ID environment variable not found.", file=sys.stderr)
-        print("Make sure you're running this script within a Domino project environment.", file=sys.stderr)
-        sys.exit(1)
+# ===== PDF GENERATION =====
 
-    print(f"Filtering active bundles for project ID: {project_id}", file=sys.stderr)
-    headers = get_auth_headers()
-    data = fetch_bundles(base_url, headers)
-    if data is None:
-        sys.exit(1)
-
-    filtered_data = filter_bundles_by_project(data, project_id)
-    total_bundles = len(data.get('data', []))
-    active_bundles = len(filtered_data.get('data', []))
-    print(f"Found {active_bundles} active bundles out of {total_bundles} total bundles for this project.", file=sys.stderr)
-    print(filtered_data)
-    file_path = print_bundle_summary(filtered_data.get('data', []))
-
-
-
-def main2():
-    import sys
-    from pathlib import Path
-
+def generate_pdf_from_markdown(markdown_file: Path, output_pdf: Path, letterhead_path: Optional[Path] = None):
+    """Generate PDF from markdown with optional letterhead"""
     try:
         import markdown
         from weasyprint import HTML, CSS
-    except ImportError as e:
-        print("Missing packages. Install with:", file=sys.stderr)
+    except ImportError:
+        print("Missing packages for PDF generation. Install with:", file=sys.stderr)
         print("  pip install markdown weasyprint", file=sys.stderr)
-        sys.exit(1)
-
-    # Hardcoded Domino paths
-    INPUT_MD  = Path("/mnt/code/HelpBot_v23_Internal_Policy_Update_documentation.md")
-    OUTPUT_PDF = Path("/mnt/artifacts/governance_report.pdf")
-    LETTERHEAD = Path("/mnt/code/images/letterhead.png")  # your Domino letterhead
-
-    if not INPUT_MD.exists():
-        print(f"ERROR: {INPUT_MD} not found.", file=sys.stderr)
-        sys.exit(1)
-    if not LETTERHEAD.exists():
-        print(f"WARNING: Letterhead not found at {LETTERHEAD}", file=sys.stderr)
-
+        return None
+    
+    if not markdown_file.exists():
+        print(f"ERROR: {markdown_file} not found.", file=sys.stderr)
+        return None
+    
+    # CSS for professional PDF styling
+    letterhead_html = ""
+    if letterhead_path and letterhead_path.exists():
+        letterhead_html = f'''
+        <div class="doc-header">
+          <img src="{letterhead_path}" alt="Letterhead">
+        </div>
+        '''
+    
     CSS_STYLES = f"""
     @page {{
       size: Letter;
-      margin: 1.5in 1in 1in 1in;  /* extra room for header image */
+      margin: 1.5in 1in 1in 1in;
       @top-center {{
         content: element(doc-header);
         vertical-align: top;
@@ -867,20 +623,38 @@ def main2():
     body {{
       font-family: "DejaVu Sans", "Liberation Sans", Arial, sans-serif;
       font-size: 10pt;
-      line-height: 1.35;
+      line-height: 1.4;
+      color: #212529;
     }}
     
     h1, h2, h3, h4 {{
       font-weight: 600;
-      margin-top: 1em;
-      margin-bottom: 0.4em;
+      margin-top: 1.2em;
+      margin-bottom: 0.5em;
       line-height: 1.2;
+      color: #1B365D;
     }}
     
-    h1 {{ font-size: 14pt; }}
-    h2 {{ font-size: 12.5pt; }}
-    h3 {{ font-size: 11.5pt; font-weight: 500; }}
-    h4 {{ font-size: 10.5pt; font-weight: 500; color: #333; }}
+    h1 {{ 
+      font-size: 18pt; 
+      border-bottom: 3px solid #1B365D;
+      padding-bottom: 0.3em;
+    }}
+    h2 {{ 
+      font-size: 14pt;
+      border-bottom: 2px solid #2E5984;
+      padding-bottom: 0.2em;
+    }}
+    h3 {{ 
+      font-size: 12pt; 
+      font-weight: 600;
+      color: #2E5984;
+    }}
+    h4 {{ 
+      font-size: 11pt; 
+      font-weight: 500; 
+      color: #4A90B8;
+    }}
     
     .doc-header {{
       position: running(doc-header);
@@ -888,81 +662,158 @@ def main2():
     }}
     .doc-header img {{
       max-width: 100%;
-      width: 6.5in;      /* tweak to fit your logo width */
+      width: 6.5in;
       height: auto;
       display: block;
       margin: 0 auto;
     }}
-        
-    p, li {{ margin: 0.5em 0; }}
     
-    table {{
-      border-collapse: collapse;
-      width: 100%;
-      margin: 0.7em 0;
-      font-size: 9.5pt;
-    }}
-    th, td {{
-      border: 1px solid #ccc;
-      padding: 6pt 8pt;
-      vertical-align: top;
-    }}
-    th {{ background: #f4f4f6; font-weight: 600; }}
-    
-    img {{
-      max-width: 100%;
-      height: auto;
-      page-break-inside: avoid;
-      margin: 0.5em 0;
+    p {{ 
+      margin: 0.6em 0;
+      text-align: justify;
     }}
     
-    code, pre {{
-      font-family: "Courier New", monospace;
-      font-size: 9.5pt;
+    strong {{
+      color: #1B365D;
+      font-weight: 600;
     }}
-    pre {{
-      background: #f7f7f9;
-      border: 1px solid #eee;
-      padding: 8pt 10pt;
-      overflow-x: auto;
+    
+    em {{
+      color: #5F6368;
+      font-size: 9pt;
     }}
     
     hr {{
       border: 0;
       border-top: 1px solid #ddd;
+      margin: 1.5em 0;
+    }}
+    
+    ul, ol {{
+      margin: 0.8em 0;
+      padding-left: 1.5em;
+    }}
+    
+    li {{
+      margin: 0.4em 0;
+    }}
+    
+    table {{
+      border-collapse: collapse;
+      width: 100%;
       margin: 1em 0;
+      font-size: 9pt;
+      page-break-inside: avoid;
+    }}
+    
+    th, td {{
+      border: 1px solid #ccc;
+      padding: 8pt 10pt;
+      vertical-align: top;
+      text-align: left;
+    }}
+    
+    th {{ 
+      background: #f4f4f6; 
+      font-weight: 600;
+      color: #1B365D;
+    }}
+    
+    tr:nth-child(even) {{
+      background: #fafafa;
+    }}
+    
+    img {{
+      max-width: 100%;
+      height: auto;
+      page-break-inside: avoid;
+      margin: 1em 0;
+      display: block;
+    }}
+    
+    code {{
+      font-family: "Courier New", monospace;
+      font-size: 9pt;
+      background: #f7f7f9;
+      padding: 2pt 4pt;
+      border-radius: 3px;
+    }}
+    
+    pre {{
+      font-family: "Courier New", monospace;
+      font-size: 9pt;
+      background: #f7f7f9;
+      border: 1px solid #eee;
+      padding: 10pt;
+      overflow-x: auto;
+      page-break-inside: avoid;
+    }}
+    
+    blockquote {{
+      border-left: 4px solid #1B365D;
+      margin: 1em 0;
+      padding-left: 1em;
+      color: #5F6368;
+      font-style: italic;
     }}
     """
-
-
-    md_text = INPUT_MD.read_text(encoding="utf-8")
-    html_body = markdown.markdown(md_text, extensions=["extra", "toc", "tables", "sane_lists"])
-    header_html = f'''
-    <div class="doc-header">
-      <img src="{LETTERHEAD}" alt="Domino Letterhead">
-    </div>
-    '''
-
+    
+    # Read markdown and convert to HTML
+    md_text = markdown_file.read_text(encoding="utf-8")
+    html_body = markdown.markdown(
+        md_text, 
+        extensions=["extra", "toc", "tables", "sane_lists", "nl2br"]
+    )
+    
+    # Build complete HTML document
     html_doc = f"""<!doctype html>
     <html>
       <head>
         <meta charset="utf-8">
-        <title>Governance Report</title>
+        <title>AI Governance Report</title>
       </head>
       <body>
-        {header_html}
+        {letterhead_html}
         {html_body}
       </body>
     </html>"""
-
-    HTML(string=html_doc, base_url=str(INPUT_MD.parent)).write_pdf(
-        str(OUTPUT_PDF),
-        stylesheets=[CSS(string=CSS_STYLES)]
-    )
-    print(f"Done → {OUTPUT_PDF}")
-
-
+    
+    # Generate PDF
+    try:
+        HTML(string=html_doc, base_url=str(Path.cwd())).write_pdf(
+        # HTML(string=html_doc, base_url=str(markdown_file.parent)).write_pdf(
+            str(output_pdf),
+            stylesheets=[CSS(string=CSS_STYLES)]
+        )
+        print(f"PDF generated successfully: {output_pdf}")
+        return output_pdf
+    except Exception as e:
+        print(f"Error generating PDF: {e}", file=sys.stderr)
+        return None
 
 if __name__ == "__main__":
-    main()
-    # main2()
+    BASE_URL = os.getenv("DOMINO_DOMAIN", "https://fitch.domino-eval.co")
+    PROJECT_ID = os.getenv("DOMINO_PROJECT_ID")
+
+    headers = get_auth_headers()
+    data = fetch_bundles(BASE_URL, headers)
+    bundles = filter_bundles_by_project(data, PROJECT_ID)
+
+    if not bundles or not bundles["data"]:
+        print("No active bundles found for project.")
+        sys.exit(0)
+
+    bundle_id = bundles["data"][0]["id"]
+    bundle_data = get_bundle_qa(BASE_URL, bundle_id)
+
+    if not bundle_data:
+        print("Could not fetch bundle QA data.")
+        sys.exit(1)
+
+    md_path = generate_markdown_documentation(bundle_data)
+    dashboard = generate_dashboard_png(Path("artifacts"))
+    if dashboard:
+        append_dashboard_section(md_path, dashboard)
+    generate_pdf_from_markdown(Path(md_path), Path("governance_report.pdf"))
+
+

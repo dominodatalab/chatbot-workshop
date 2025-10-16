@@ -12,6 +12,7 @@ from openinference.semconv.trace import SpanAttributes, OpenInferenceSpanKindVal
 # Configuration
 ARIZE_API_KEY = os.getenv('ARIZE_API_KEY')
 ARIZE_SPACE_ID = os.getenv('ARIZE_SPACE_ID')
+OPENAI_KEY = os.getenv('OPENAI_KEY')
 
 AGENTS = [
     {
@@ -91,11 +92,14 @@ def detect_hallucination(client: OpenAI, query: str, answer: str, tracer) -> dic
         )
         
         result = json.loads(response.choices[0].message.content)
-        print('halluci', result)
-        result['hallucination_score'] = 1.0 - (
-            result['consistency'] * 0.5 + 
-            result['specificity'] * 0.3 + 
-            result['confidence'] * 0.2
+
+        result['hallucination_score'] = round(
+            1.0 - (
+                result['consistency'] * 0.5 +
+                result['specificity'] * 0.3 +
+                result['confidence'] * 0.2
+            ),
+            4
         )
         
         span.set_attribute("hallucination.score", result['hallucination_score'])
@@ -123,14 +127,7 @@ def domino_short_id(length: int = 8) -> str:
 
 class MultiAgentModel(PythonModel):
     """MLflow-compatible wrapper for multi-agent orchestration"""
-    
-    def load_context(self, context):
-        """Initialize OpenAI client when model loads"""
-        api_key = os.getenv('OPENAI_API_KEY')
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY environment variable not set")
-        self.client = OpenAI(api_key=api_key)
-    
+        
     def _call_agent(self, agent_name: str, query: str) -> str:
         """Execute single agent query"""
         agent = next(a for a in AGENTS if a['name'] == agent_name)
@@ -391,16 +388,13 @@ def main():
     st.title("HelpBot")
 
     with st.sidebar:
-        api_key = st.text_input("OpenAI API Key", type="password", key="openai_api_key")
+        api_key = OPENAI_KEY
+        st.text_input("OpenAI API Key", value=api_key, type="password", key="openai_api_key")
         if api_key:
             st.success("✓ API key configured")
         
         st.divider()
-    
-    if not api_key:
-        st.info("👈 Enter your OpenAI API key in the sidebar to begin")
-        return
-    
+        
     if "client" not in st.session_state or st.session_state.get("api_key") != api_key:
         
         st.session_state.client = OpenAI(api_key=api_key)
