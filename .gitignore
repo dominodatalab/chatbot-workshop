@@ -10,4 +10,8 @@ secrets.toml
 .*
 !/.gitignore
 
-!README.md
+*.md
+!**/README.md
+
+
+
