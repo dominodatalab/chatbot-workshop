@@ -9,3 +9,5 @@ secrets.toml
 # The "!" exception keeps this .gitignore file itself
 .*
 !/.gitignore
+
+!README.md
