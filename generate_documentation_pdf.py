@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 """
 Domino Governance → Markdown generator + Visual Dashboard appender
 - Pulls active bundles for current Domino project
@@ -49,80 +50,192 @@ def get_auth_headers():
         headers['X-Domino-Api-Key'] = api_key
     return headers
 
+"""
+Enhanced data fetching functions matching the JavaScript fetchAllData logic.
+Fetches bundles, policies, drafts, and results, then merges them.
+"""
 
-def fetch_bundles(base_url, headers):
-    endpoint = '/api/governance/v1/bundles'
-    url = urljoin(base_url, endpoint)
+import os
+import requests
+from typing import Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+def get_base_url() -> str:
+    """Get base URL from environment or use default."""
+    return os.getenv('DOMINO_API_BASE', 'https://fitch.domino-eval.com/')
+
+
+def get_auth_headers() -> Dict[str, str]:
+    """Get authentication headers."""
+    api_key = os.getenv('DOMINO_USER_API_KEY') or os.getenv('DOMINO_API_KEY')
+    headers = {'accept': 'application/json'}
+    if api_key:
+        headers['X-Domino-Api-Key'] = api_key
+    return headers
+
+
+def fetch_policy(base_url: str, headers: Dict[str, str], policy_id: str) -> Optional[Dict]:
+    """Fetch a single policy by ID."""
+    url = f"{base_url}api/governance/v1/policies/{policy_id}"
     try:
         response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching bundles: {e}", file=sys.stderr)
-        return None
-
-
-def filter_bundles_by_project(data, project_id):
-    if not data or 'data' not in data:
-        return data
-    filtered_bundles = [
-        bundle for bundle in data['data']
-        if bundle.get('projectId') == project_id and bundle.get('state') == 'Active'
-    ]
-    filtered_data = data.copy()
-    filtered_data['data'] = filtered_bundles
-    if 'meta' in filtered_data and 'pagination' in filtered_data['meta']:
-        filtered_data['meta']['pagination']['totalCount'] = len(filtered_bundles)
-    return filtered_data
-
-
-def fetch_bundle_drafts(base_url, headers, bundle_id):
-    drafts_url = f'{base_url}api/governance/v1/drafts/latest?bundleId={bundle_id}'
-    try:
-        response = requests.get(drafts_url, headers=headers, timeout=30)
-        if response.status_code == 200:
+        if response.ok:
             return response.json()
-        else:
-            print(f"Failed to get drafts data: {response.status_code}")
-            return None
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching drafts: {e}")
-        return None
+        print(f"Error fetching policy {policy_id}: {e}")
+    return None
 
 
-def parse_evidence_data(drafts_data):
-    evidence_groups: Dict[str, Dict] = {}
-    if not drafts_data:
-        return evidence_groups
-    for draft in drafts_data:
-        evidence_id = draft.get('evidenceId')
-        if evidence_id not in evidence_groups:
-            evidence_groups[evidence_id] = {
-                'evidence_id': evidence_id,
-                'artifacts': [],
-                'updated_at': draft.get('updatedAt')
-            }
-        artifact_content = draft.get('artifactContent')
-        artifact_info = {
-            'artifact_id': draft.get('artifactId'),
-            'content': artifact_content,
-            'type': type(artifact_content).__name__,
-            'updated_at': draft.get('updatedAt')
+def fetch_bundle_results(base_url: str, headers: Dict[str, str], bundle_id: str) -> Optional[List]:
+    """Fetch published results for a bundle."""
+    url = f"{base_url}api/governance/v1/results/latest?bundleID={bundle_id}"
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.ok:
+            return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching results for bundle {bundle_id}: {e}")
+    return None
+
+
+def fetch_bundle_drafts(base_url: str, headers: Dict[str, str], bundle_id: str) -> Optional[List]:
+    """Fetch drafts for a bundle."""
+    url = f"{base_url}api/governance/v1/drafts/latest?bundleID={bundle_id}"
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.ok:
+            return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching drafts for bundle {bundle_id}: {e}")
+    return None
+
+
+def merge_evidence_data(drafts: Optional[List], results: Optional[List]) -> List[Dict]:
+    """
+    Merge drafts and results, with results taking precedence.
+    Returns list of evidence artifacts with source tracking.
+    """
+    evidence_map = {}
+    
+    # Add drafts first
+    if drafts:
+        for draft in drafts:
+            key = draft.get('evidenceId')
+            if key:
+                evidence_map[key] = {**draft, 'source': 'draft'}
+    
+    # Override with results (published data takes precedence)
+    if results:
+        for result in results:
+            key = result.get('evidenceId') or result.get('artifactId')
+            if key:
+                existing = evidence_map.get(key, {})
+                evidence_map[key] = {
+                    **result,
+                    'source': 'result',
+                    # Keep draft data if result is missing fields
+                    'artifactContent': result.get('artifactContent') or existing.get('artifactContent')
+                }
+    
+    return list(evidence_map.values())
+
+
+def fetch_all_data() -> Dict:
+    """
+    Fetch all governance data: bundles, policies, drafts, and results.
+    Returns dict with 'bundles', 'policies', and 'evidence' keys.
+    """
+    base_url = get_base_url()
+    headers = get_auth_headers()
+    project_id = os.getenv('DOMINO_PROJECT_ID')
+    
+    app_state = {
+        'bundles': [],
+        'policies': {},
+        'evidence': {}
+    }
+    
+    # 1. Fetch bundles
+    print("Fetching bundles...")
+    bundles_url = f"{base_url}api/governance/v1/bundles"
+    try:
+        response = requests.get(bundles_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        bundles_data = response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to fetch bundles: {e}")
+        return app_state
+    
+    # 2. Filter bundles
+    all_bundles = bundles_data.get('data', [])
+    filtered_bundles = [
+        bundle for bundle in all_bundles
+        if bundle.get('state') != 'Archived'
+        and bundle.get('projectId') == project_id
+        and bundle.get('policies')
+    ]
+    
+    print(f"Found {len(filtered_bundles)} active bundles for project {project_id}")
+    app_state['bundles'] = filtered_bundles
+    
+    # 3. Collect all unique policy IDs
+    policy_ids = set()
+    for bundle in filtered_bundles:
+        for policy in bundle.get('policies', []):
+            if policy.get('policyId'):
+                policy_ids.add(policy['policyId'])
+    
+    # 4. Fetch all policies in parallel
+    print(f"Fetching {len(policy_ids)} policies...")
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_pid = {
+            executor.submit(fetch_policy, base_url, headers, pid): pid 
+            for pid in policy_ids
         }
-        if isinstance(artifact_content, dict):
-            if 'files' in artifact_content:
-                artifact_info['content_type'] = 'file_upload'
-                artifact_info['files'] = artifact_content.get('files', [])
-            else:
-                artifact_info['content_type'] = 'structured_data'
-        elif isinstance(artifact_content, list):
-            artifact_info['content_type'] = 'multiple_choice'
-            artifact_info['selections'] = artifact_content
-        else:
-            artifact_info['content_type'] = 'text'
-            artifact_info['text'] = str(artifact_content)
-        evidence_groups[evidence_id]['artifacts'].append(artifact_info)
-    return evidence_groups
+        
+        for future in as_completed(future_to_pid):
+            pid = future_to_pid[future]
+            try:
+                policy_data = future.result()
+                if policy_data:
+                    app_state['policies'][pid] = policy_data
+            except Exception as e:
+                print(f"Policy {pid} failed: {e}")
+    
+    # 5. Fetch drafts AND results for each bundle in parallel
+    print(f"Fetching evidence for {len(filtered_bundles)} bundles...")
+    
+    def fetch_bundle_evidence(bundle):
+        bundle_id = bundle.get('id')
+        drafts = fetch_bundle_drafts(base_url, headers, bundle_id)
+        results = fetch_bundle_results(base_url, headers, bundle_id)
+        merged = merge_evidence_data(drafts, results)
+        
+        print(f"  Bundle {bundle_id}: {len(drafts or [])} drafts, "
+              f"{len(results or [])} results, {len(merged)} merged")
+        
+        return bundle_id, merged
+    
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [
+            executor.submit(fetch_bundle_evidence, bundle) 
+            for bundle in filtered_bundles
+        ]
+        
+        for future in as_completed(futures):
+            try:
+                bundle_id, evidence = future.result()
+                app_state['evidence'][bundle_id] = evidence
+            except Exception as e:
+                print(f"Evidence fetch failed: {e}")
+    
+    print(f"Data fetch complete: {len(app_state['bundles'])} bundles, "
+          f"{len(app_state['policies'])} policies, "
+          f"{len(app_state['evidence'])} evidence sets")
+    
+    return app_state
+
 
 
 # =========================
@@ -630,121 +743,6 @@ def generate_dashboard_png(output_dir: Path) -> Optional[Path]:
     return out
 
 
-# =========================
-# Orchestration
-# =========================
-
-def print_organized_evidence(evidence_groups):
-    print(f"\nORGANIZED EVIDENCE DATA FOR PDF GENERATION")
-    print(f"Found {len(evidence_groups)} evidence sections")
-    for i, (evidence_id, evidence) in enumerate(evidence_groups.items(), 1):
-        print(f"\n{'='*80}")
-        print(f"EVIDENCE SECTION {i}")
-        print(f"Evidence ID: {evidence_id}")
-        print(f"Last Updated: {evidence['updated_at']}")
-        print(f"Number of Artifacts: {len(evidence['artifacts'])}")
-        print(f"{'='*80}")
-        for j, artifact in enumerate(evidence['artifacts'], 1):
-            print(f"\n  Artifact {j}")
-            print(f"      Artifact ID: {artifact.get('artifact_id')}")
-            print(f"      Content Type: {artifact.get('content_type')}")
-            print(f"      Updated: {artifact.get('updated_at')}")
-            if artifact.get('content_type') == 'text':
-                content = artifact.get('text', '')
-                print(f"      Content: {content[:200]}..." if len(content) > 200 else f"      Content: {content}")
-            elif artifact.get('content_type') == 'multiple_choice':
-                print(f"      Selections: {artifact.get('selections')}")
-            elif artifact.get('content_type') == 'file_upload':
-                files = artifact.get('files', [])
-                print(f"      Files ({len(files)}):")
-                for f in files:
-                    print(f"        - {f.get('name')} ({f.get('sizeLabel')})")
-                    print(f"          Path: {f.get('path')}")
-            elif artifact.get('content_type') == 'structured_data':
-                print(f"      Structured Data: {artifact.get('content')}")
-
-
-def print_bundle_summary(bundles):
-    if not bundles:
-        print("No active bundles found for this project.")
-        return {}, None
-
-    base_url = 'https://fitch.domino-eval.com/'
-    headers = get_auth_headers()
-
-    print(f"\n=== COMPREHENSIVE GOVERNANCE BUNDLE ANALYSIS ===")
-    print(f"Total active bundles: {len(bundles)}")
-
-    all_evidence_data = {}
-
-    for i, bundle in enumerate(bundles, 1):
-        bundle_id = bundle.get('id')
-        print(f"\n{'='*80}")
-        print(f"COMPREHENSIVE BUNDLE REPORT: {bundle.get('name', 'Unnamed')}")
-        print(f"{'='*80}")
-
-        print(f"\nBASIC INFORMATION")
-        print(f"Bundle ID: {bundle_id}")
-        print(f"State: {bundle.get('state', 'Unknown')}")
-        print(f"Current Stage: {bundle.get('stage', 'Unknown')}")
-        print(f"Policy: {bundle.get('policyName', 'Unknown')}")
-        print(f"Classification: {bundle.get('classificationValue', 'None')}")
-        print(f"Project: {bundle.get('projectName', 'N/A')} (Owner: {bundle.get('projectOwner', 'N/A')})")
-
-        created_by = bundle.get('createdBy', {})
-        creator_name = f"{created_by.get('firstName', '')} {created_by.get('lastName', '')}".strip()
-        print(f"Created: {bundle.get('createdAt', 'Unknown')} by {creator_name}")
-
-        print(f"\nFETCHING EVIDENCE DATA FROM DRAFTS")
-        drafts_data = fetch_bundle_drafts(base_url, headers, bundle_id)
-
-        if drafts_data:
-            print(f"Successfully retrieved {len(drafts_data)} evidence items")
-            evidence_groups = parse_evidence_data(drafts_data)
-            print_organized_evidence(evidence_groups)
-            all_evidence_data[bundle_id] = {'bundle': bundle, 'evidence': evidence_groups}
-        else:
-            print("No evidence data found")
-
-        stages = bundle.get('stages', [])
-        if stages:
-            print(f"\nGOVERNANCE STAGES ({len(stages)})")
-            for stage_num, stage in enumerate(stages, 1):
-                info = stage.get('stage', {})
-                name = info.get('name', 'Unknown')
-                print(f"  {stage_num}. {name}")
-                print(f"     Stage ID: {info.get('id', 'N/A')}")
-                if name == bundle.get('stage'):
-                    print(f"     CURRENT STAGE")
-
-        if i < len(bundles):
-            print(f"\n{'-'*80}\nNEXT BUNDLE\n{'-'*80}")
-
-    print(f"\nGENERATING MARKDOWN DOCUMENTATION")
-    
-    # Generate single dashboard once for all bundles
-    out_dir = Path(os.getenv("OUTPUT_DIR", "/mnt/artifacts"))
-    png_path = generate_dashboard_png(out_dir)
-    print('data', all_evidence_data)
-    # Generate markdown for each bundle
-    for bid, data in all_evidence_data.items():
-        bundle_name = data['bundle'].get('name', 'Unnamed')
-        safe_filename = "".join(c for c in bundle_name if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
-        
-        # Use bundle ID to ensure unique filenames
-        output_path = f"bundle_doc_{safe_filename}_{bid}_documentation.md"
-        
-        print(f"Creating documentation for: {bundle_name}")
-        generated_file = generate_markdown_documentation(data, data['evidence'], output_path)
-        print(f"Saved: {generated_file}")
-        
-        # Append same dashboard to each bundle's markdown
-        if png_path:
-            append_dashboard_section(generated_file, png_path)
-        
-    return all_evidence_data, png_path
-
-
 def append_dashboard_section(markdown_file: str, png_path: Path) -> None:
     """
     Appends a 'Visual Governance Dashboard' section to the given Markdown file,
@@ -772,23 +770,33 @@ def append_dashboard_section(markdown_file: str, png_path: Path) -> None:
 def main():
     base_url = 'https://fitch.domino-eval.com/'
     project_id = os.getenv('DOMINO_PROJECT_ID')
-    if not project_id:
-        print("Error: DOMINO_PROJECT_ID environment variable not found.", file=sys.stderr)
-        print("Make sure you're running this script within a Domino project environment.", file=sys.stderr)
-        sys.exit(1)
 
     print(f"Filtering active bundles for project ID: {project_id}", file=sys.stderr)
     headers = get_auth_headers()
-    data = fetch_bundles(base_url, headers)
+    app_state = fetch_all_data()
+    print('app state', app_state)
+
+    quit()
     if data is None:
         sys.exit(1)
 
-    filtered_data = filter_bundles_by_project(data, project_id)
-    total_bundles = len(data.get('data', []))
-    active_bundles = len(filtered_data.get('data', []))
-    print(f"Found {active_bundles} active bundles out of {total_bundles} total bundles for this project.", file=sys.stderr)
-
-    return print_bundle_summary(filtered_data.get('data', []))
+    all_evidence_data = app_state
+    out_dir = Path(os.getenv("OUTPUT_DIR", "/mnt/artifacts"))
+    png_path = generate_dashboard_png(out_dir)
+    print('data', all_evidence_data)
+    # Generate markdown for each bundle
+    for bid, data in all_evidence_data.items():
+        bundle_name = data['bundle'].get('name', 'Unnamed')
+        safe_filename = "".join(c for c in bundle_name if c.isalnum() or c in (' ', '-', '_')).rstrip().replace(' ', '_')
+        
+        output_path = f"bundle_doc_{safe_filename}_{bid}_documentation.md"
+        generated_file = generate_markdown_documentation(data, data['evidence'], output_path)
+        print(f"Saved: {generated_file}")
+        
+        if png_path:
+            append_dashboard_section(generated_file, png_path)
+        
+    return all_evidence_data, png_path
 
 
 def main2(doc_paths):
