@@ -8,7 +8,37 @@ import os
 import sys
 import requests
 from typing import Dict, List
+from datetime import datetime, timezone
 
+def parse_dt(dt):
+    """
+    Parse an ISO8601 timestamp into an aware UTC datetime.
+    Returns datetime.min (aware UTC) if parsing fails or missing.
+    """
+    if not dt:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        # Replace Z with UTC offset
+        if dt.endswith("Z"):
+            return datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        return datetime.fromisoformat(dt)
+    except Exception:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def bundle_latest_time(bundle):
+    """
+    For a given bundle, return the most recent created_at timestamp
+    from any of its QA data entries.
+    """
+    qa_data = bundle.get("qa_data") or []
+    qa_times = [parse_dt(qa.get("created_at")) for qa in qa_data if qa.get("created_at")]
+
+    if not qa_times:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+    # Return the latest aware UTC datetime
+    return max(qa_times)
 
 def get_base_url() -> str:
     return os.getenv('DOMINO_API_BASE', 'https://fitch.domino-eval.com/')
@@ -95,22 +125,25 @@ def build_artifact_map(policy: Dict) -> Dict[str, Dict]:
     return artifact_map
 
 
-def fetch_bundle_results(bundle_id: str) -> List[Dict]:
-    """Fetch published results for a bundle."""
+def fetch_bundle_results(bundle_id: str, policy_ids: List[str]) -> List[Dict]:
+    """Fetch published results for all policies within a bundle."""
     base_url = get_base_url()
     headers = get_auth_headers()
-    
-    url = f"{base_url}api/governance/v1/results/latest"
-    params = {'bundleID': bundle_id}
-    
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=30)
-        response.raise_for_status()
-        return response.json() or []
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching results for bundle {bundle_id}: {e}", file=sys.stderr)
-        return []
+    all_results = []
 
+    for pid in policy_ids:
+        url = f"{base_url}api/governance/v1/results/latest"
+        params = {'bundleID': bundle_id, 'policyID': pid}
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            response.raise_for_status()
+            results = response.json() or []
+            all_results.extend(results)
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching results for bundle {bundle_id}, policy {pid}: {e}", file=sys.stderr)
+            continue
+
+    return all_results
 
 def extract_bundle_qa(bundle: Dict, results: List[Dict], artifact_map: Dict[str, Dict]) -> Dict:
     """Extract all Q&A from bundle results with questions mapped."""
@@ -219,7 +252,10 @@ def main():
         print(f"\nProcessing bundle: {bundle_name} ({bundle_id})")
         
         # Fetch results
-        results = fetch_bundle_results(bundle_id)
+        policy_ids = [p.get("policyId") for p in bundle.get("policies", []) if p.get("policyId")]
+        results = fetch_bundle_results(bundle_id, policy_ids)
+
+        # results = fetch_bundle_results(bundle_id)
         print(f"  Found {len(results)} result entries")
         
         # Extract Q&A with questions
@@ -242,10 +278,9 @@ def main():
         return []
     
     # Find bundle with most recent created_at timestamp
-    most_recent_bundle = max(
-        bundles_with_qa,
-        key=lambda b: max(qa['created_at'] for qa in b['qa_data'])
-    )
+    print('-')
+    print(bundles_with_qa)
+    most_recent_bundle = max(bundles_with_qa, key=bundle_latest_time)
     
     print(f"\nFiltering to most recent bundle:")
     print(f"  Bundle: {most_recent_bundle['bundle_name']}")
@@ -258,7 +293,7 @@ if __name__ == "__main__":
     data = main()
     
     # Save to JSON
-    output_file = os.getenv('OUTPUT_FILE', 'governance_qa_data.json')
+    output_file = os.getenv('OUTPUT_FILE', '/mnt/artifacts/governance_qa_data.json')
     if data:
         import json
         from pathlib import Path

@@ -184,11 +184,10 @@ def markdown_to_pdf(md_path: Path, dashboard_png: Path, output_pdf: Path):
 # ========================
 
 def main():
-    base_dir = Path("/mnt/code")
     artifacts_dir = Path("/mnt/artifacts")
     artifacts_dir.mkdir(exist_ok=True)
 
-    md_file = base_dir / "governance_documentation.md"
+    md_file = artifacts_dir / "governance_documentation.md"  # <-- read from artifacts
     if not md_file.exists():
         print(f"ERROR: {md_file} not found.")
         sys.exit(1)
@@ -200,6 +199,7 @@ def main():
 
     df = pull_arize_data(api, space, model, days_back)
     df = clean_df(df)
+
     dashboard_path = artifacts_dir / "ai_governance_dashboard.png"
     build_dashboard(df, dashboard_path)
 

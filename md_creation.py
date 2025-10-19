@@ -387,8 +387,8 @@ def generate_markdown(bundle_data: Dict) -> str:
 
 def main():
     """Main function to process governance Q&A data to markdown."""
-    input_file = os.getenv('INPUT_FILE', 'governance_qa_data.json')
-    output_file = os.getenv('OUTPUT_FILE', 'governance_documentation.md')
+    input_file = os.getenv('INPUT_FILE', '/mnt/artifacts/governance_qa_data.json')
+    output_file = os.getenv('OUTPUT_FILE', '/mnt/artifacts/governance_documentation.md')
     
     try:
         # Load data
